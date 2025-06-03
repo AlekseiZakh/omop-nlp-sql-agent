@@ -465,7 +465,7 @@ class GoogleGeminiTranslator:
     
     def __init__(self, api_key: str, dataset_handler: Optional[DatasetHandler] = None):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
         self.schema_handler = OMOPSchemaHandler()
         self.dataset_handler = dataset_handler
     
