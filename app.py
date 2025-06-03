@@ -382,7 +382,7 @@ def main():
         st.markdown("Convert natural language queries into OMOP Common Data Model SQL queries")
     
     with col3:
-        st.markdown("[![GitHub](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/yourusername/omop-nlp-sql-agent)")
+        st.markdown("[![GitHub](https://img.shields.io/badge/GitHub-Repository-black?style=for-the-badge&logo=github)](https://github.com/AlekseiZakh/omop-nlp-sql-agent)")
     
     # Initialize dataset handler
     dataset_handler = DatasetHandler()
