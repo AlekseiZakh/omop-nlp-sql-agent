@@ -629,7 +629,8 @@ def main():
         st.divider()
         st.markdown("### 👨‍⚕️ About")
         st.markdown("""
-        Created by Aleksey Zakharov Medical Doctor & Data Scientist
+        Created by Aleksey Zakharov 
+        Medical Doctor & Data Scientist
         
         **Features:**
         - Expert OMOP CDM knowledge
