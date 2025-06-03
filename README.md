@@ -1,4 +1,4 @@
-markdown# 🏥 OMOP NLP-to-SQL Agent
+🏥 OMOP NLP-to-SQL Agent
 
 Convert natural language queries into OMOP Common Data Model SQL queries using AI.
 
