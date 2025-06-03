@@ -142,18 +142,64 @@ class DatasetHandler:
         try:
             # Handle both file path and uploaded file object
             if hasattr(csv_file_or_path, 'read'):
-                # It's an uploaded file object
-                df = pd.read_csv(csv_file_or_path)
+                # It's an uploaded file object - try multiple encodings
+                csv_file_or_path.seek(0)
+                
+                # Try different encodings
+                encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                df = None
+                
+                for encoding in encodings:
+                    try:
+                        csv_file_or_path.seek(0)
+                        content = csv_file_or_path.read().decode(encoding)
+                        
+                        # Convert to StringIO for pandas
+                        from io import StringIO
+                        df = pd.read_csv(StringIO(content))
+                        print(f"✅ Successfully read file with {encoding} encoding")
+                        break
+                        
+                    except (UnicodeDecodeError, UnicodeError):
+                        print(f"⚠️ Failed to read with {encoding} encoding, trying next...")
+                        continue
+                    except Exception as e:
+                        print(f"⚠️ Error with {encoding}: {str(e)}")
+                        continue
+                
+                if df is None:
+                    print("❌ Could not read file with any supported encoding")
+                    return False
             else:
                 # It's a file path
-                df = pd.read_csv(csv_file_or_path)
+                # Try different encodings for file path
+                encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                df = None
+                
+                for encoding in encodings:
+                    try:
+                        df = pd.read_csv(csv_file_or_path, encoding=encoding)
+                        print(f"✅ Successfully read file with {encoding} encoding")
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                    except Exception as e:
+                        print(f"⚠️ Error with {encoding}: {str(e)}")
+                        continue
+                
+                if df is None:
+                    print("❌ Could not read file with any supported encoding")
+                    return False
             
             print(f"📊 Original dataset shape: {df.shape}")
             print(f"📋 Original columns: {list(df.columns)}")
             
-            # Show first few rows for debugging
+            # Show first few rows for debugging (safely handle any encoding issues in display)
             print("📝 First few rows:")
-            print(df.head(2))
+            try:
+                print(df.head(2))
+            except Exception as e:
+                print(f"⚠️ Could not display rows: {str(e)}")
             
             # Auto-detect column names (flexible naming)
             possible_nl_cols = ['natural_language', 'nl_query', 'question', 'query', 'natural_query', 'input', 'text']
@@ -164,26 +210,35 @@ class DatasetHandler:
             
             # Try exact matches first
             for col in df.columns:
-                col_lower = col.lower().strip()
-                if col_lower in possible_nl_cols:
-                    nl_col = col
-                elif col_lower in possible_sql_cols:
-                    sql_col = col
+                try:
+                    col_lower = str(col).lower().strip()
+                    if col_lower in possible_nl_cols:
+                        nl_col = col
+                    elif col_lower in possible_sql_cols:
+                        sql_col = col
+                except:
+                    continue
             
             # If exact match fails, try partial matches
             if nl_col is None:
                 for col in df.columns:
-                    col_lower = col.lower().strip()
-                    if any(keyword in col_lower for keyword in ['question', 'query', 'natural', 'input']):
-                        nl_col = col
-                        break
+                    try:
+                        col_lower = str(col).lower().strip()
+                        if any(keyword in col_lower for keyword in ['question', 'query', 'natural', 'input']):
+                            nl_col = col
+                            break
+                    except:
+                        continue
             
             if sql_col is None:
                 for col in df.columns:
-                    col_lower = col.lower().strip()
-                    if any(keyword in col_lower for keyword in ['sql', 'answer', 'output', 'target']):
-                        sql_col = col
-                        break
+                    try:
+                        col_lower = str(col).lower().strip()
+                        if any(keyword in col_lower for keyword in ['sql', 'answer', 'output', 'target']):
+                            sql_col = col
+                            break
+                    except:
+                        continue
             
             # If auto-detection fails, use first two columns
             if nl_col is None or sql_col is None:
@@ -204,12 +259,17 @@ class DatasetHandler:
             
             print(f"📊 Before cleaning: {len(self.dataset)} rows")
             
-            # Remove any empty rows
+            # Clean the data more robustly
             initial_size = len(self.dataset)
-            self.dataset = self.dataset.dropna().reset_index(drop=True)
             
-            # Remove rows where either column is empty string
+            # Convert to string and handle NaN values
+            self.dataset['natural_language'] = self.dataset['natural_language'].astype(str)
+            self.dataset['sql_query'] = self.dataset['sql_query'].astype(str)
+            
+            # Remove rows with 'nan', empty strings, or just whitespace
             self.dataset = self.dataset[
+                (self.dataset['natural_language'].str.lower() != 'nan') & 
+                (self.dataset['sql_query'].str.lower() != 'nan') &
                 (self.dataset['natural_language'].str.strip() != '') & 
                 (self.dataset['sql_query'].str.strip() != '')
             ].reset_index(drop=True)
@@ -225,18 +285,25 @@ class DatasetHandler:
             
             # Create TF-IDF vectors for similarity matching
             try:
+                # Clean text for TF-IDF (remove any problematic characters)
+                clean_texts = []
+                for text in self.dataset['natural_language']:
+                    try:
+                        # Convert to string and encode/decode to clean up any encoding issues
+                        clean_text = str(text).encode('utf-8', errors='ignore').decode('utf-8')
+                        clean_texts.append(clean_text)
+                    except:
+                        clean_texts.append('generic query')  # fallback
+                
                 self.vectorizer = TfidfVectorizer(
-                    max_features=min(1000, len(self.dataset) * 10),  # Adjust based on dataset size
+                    max_features=min(1000, len(self.dataset) * 10),
                     stop_words='english',
                     ngram_range=(1, 2),
-                    min_df=1,  # Important for small datasets
+                    min_df=1,
                     max_df=0.95
                 )
                 
-                self.query_vectors = self.vectorizer.fit_transform(
-                    self.dataset['natural_language']
-                )
-                
+                self.query_vectors = self.vectorizer.fit_transform(clean_texts)
                 print(f"✅ TF-IDF vectors created: {self.query_vectors.shape}")
                 
             except Exception as e:
@@ -248,12 +315,17 @@ class DatasetHandler:
             print(f"✅ Successfully loaded {len(self.dataset)} query pairs!")
             print(f"📊 Dataset shape: {self.dataset.shape}")
             
-            # Show sample of loaded data
+            # Show sample of loaded data (safely)
             print("\n📝 Sample loaded data:")
-            for i, row in self.dataset.head(2).iterrows():
-                print(f"Row {i+1}:")
-                print(f"  NL: {row['natural_language'][:100]}...")
-                print(f"  SQL: {row['sql_query'][:100]}...")
+            try:
+                for i, row in self.dataset.head(2).iterrows():
+                    nl_preview = str(row['natural_language'])[:100] + "..." if len(str(row['natural_language'])) > 100 else str(row['natural_language'])
+                    sql_preview = str(row['sql_query'])[:100] + "..." if len(str(row['sql_query'])) > 100 else str(row['sql_query'])
+                    print(f"Row {i+1}:")
+                    print(f"  NL: {nl_preview}")
+                    print(f"  SQL: {sql_preview}")
+            except Exception as e:
+                print(f"⚠️ Could not display sample data: {str(e)}")
             
             return True
             
@@ -263,10 +335,6 @@ class DatasetHandler:
         except pd.errors.ParserError as e:
             print(f"❌ Error parsing CSV: {str(e)}")
             print("💡 Try checking if your CSV has proper formatting")
-            return False
-        except UnicodeDecodeError as e:
-            print(f"❌ Error reading file encoding: {str(e)}")
-            print("💡 Try saving your CSV with UTF-8 encoding")
             return False
         except Exception as e:
             print(f"❌ Unexpected error loading dataset: {str(e)}")
@@ -287,8 +355,11 @@ class DatasetHandler:
             return self.get_random_examples(n_examples)
         
         try:
+            # Clean the input query
+            clean_query = str(query).encode('utf-8', errors='ignore').decode('utf-8')
+            
             # Transform the input query
-            query_vector = self.vectorizer.transform([query])
+            query_vector = self.vectorizer.transform([clean_query])
             
             # Calculate similarities
             similarities = cosine_similarity(query_vector, self.query_vectors)[0]
@@ -300,8 +371,8 @@ class DatasetHandler:
             for idx in top_indices:
                 if similarities[idx] > 0.05:  # Lower threshold for small datasets
                     examples.append({
-                        'natural_language': self.dataset.iloc[idx]['natural_language'],
-                        'sql_query': self.dataset.iloc[idx]['sql_query'],
+                        'natural_language': str(self.dataset.iloc[idx]['natural_language']),
+                        'sql_query': str(self.dataset.iloc[idx]['sql_query']),
                         'similarity': similarities[idx]
                     })
             
@@ -323,8 +394,8 @@ class DatasetHandler:
         
         return [
             {
-                'natural_language': row['natural_language'],
-                'sql_query': row['sql_query']
+                'natural_language': str(row['natural_language']),
+                'sql_query': str(row['sql_query'])
             }
             for _, row in sample_df.iterrows()
         ]
@@ -337,10 +408,18 @@ class DatasetHandler:
         
         print(f"📈 Dataset Statistics:")
         print(f"   Total query pairs: {len(self.dataset)}")
-        print(f"   Average NL query length: {self.dataset['natural_language'].str.len().mean():.1f} chars")
-        print(f"   Average SQL query length: {self.dataset['sql_query'].str.len().mean():.1f} chars")
+        
+        try:
+            print(f"   Average NL query length: {self.dataset['natural_language'].str.len().mean():.1f} chars")
+            print(f"   Average SQL query length: {self.dataset['sql_query'].str.len().mean():.1f} chars")
+        except:
+            print("   Could not calculate average lengths")
+        
         print(f"\n📋 Sample queries:")
-        print(self.dataset.head())
+        try:
+            print(self.dataset.head())
+        except:
+            print("Could not display sample queries")
 
 class SQLValidator:
     """Basic SQL validation for OMOP queries"""
