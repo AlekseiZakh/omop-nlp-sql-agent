@@ -137,19 +137,32 @@ class DatasetHandler:
         self.vectorizer = None
         self.query_vectors = None
     
-    def load_dataset(self, csv_path: str) -> bool:
+    def load_dataset(self, csv_file_or_path) -> bool:
         """Load the CSV dataset with natural language and SQL pairs"""
         try:
-            # Try different possible column names
-            df = pd.read_csv(csv_path)
+            # Handle both file path and uploaded file object
+            if hasattr(csv_file_or_path, 'read'):
+                # It's an uploaded file object
+                df = pd.read_csv(csv_file_or_path)
+            else:
+                # It's a file path
+                df = pd.read_csv(csv_file_or_path)
+            
+            print(f"📊 Original dataset shape: {df.shape}")
+            print(f"📋 Original columns: {list(df.columns)}")
+            
+            # Show first few rows for debugging
+            print("📝 First few rows:")
+            print(df.head(2))
             
             # Auto-detect column names (flexible naming)
-            possible_nl_cols = ['natural_language', 'nl_query', 'question', 'query', 'natural_query']
-            possible_sql_cols = ['sql', 'sql_query', 'omop_sql', 'answer', 'sql_answer']
+            possible_nl_cols = ['natural_language', 'nl_query', 'question', 'query', 'natural_query', 'input', 'text']
+            possible_sql_cols = ['sql', 'sql_query', 'omop_sql', 'answer', 'sql_answer', 'output', 'target']
             
             nl_col = None
             sql_col = None
             
+            # Try exact matches first
             for col in df.columns:
                 col_lower = col.lower().strip()
                 if col_lower in possible_nl_cols:
@@ -157,42 +170,121 @@ class DatasetHandler:
                 elif col_lower in possible_sql_cols:
                     sql_col = col
             
+            # If exact match fails, try partial matches
+            if nl_col is None:
+                for col in df.columns:
+                    col_lower = col.lower().strip()
+                    if any(keyword in col_lower for keyword in ['question', 'query', 'natural', 'input']):
+                        nl_col = col
+                        break
+            
+            if sql_col is None:
+                for col in df.columns:
+                    col_lower = col.lower().strip()
+                    if any(keyword in col_lower for keyword in ['sql', 'answer', 'output', 'target']):
+                        sql_col = col
+                        break
+            
+            # If auto-detection fails, use first two columns
             if nl_col is None or sql_col is None:
-                # If auto-detection fails, use first two columns
                 columns = df.columns.tolist()
+                if len(columns) < 2:
+                    print(f"❌ Dataset needs at least 2 columns, found {len(columns)}")
+                    return False
+                    
                 nl_col = columns[0]
                 sql_col = columns[1]
-                print(f"⚠️ Auto-detection failed, using columns: {nl_col}, {sql_col}")
+                print(f"⚠️ Auto-detection failed, using columns: '{nl_col}' and '{sql_col}'")
+            else:
+                print(f"✅ Detected columns: '{nl_col}' (natural language) and '{sql_col}' (SQL)")
             
+            # Create the cleaned dataset
             self.dataset = df[[nl_col, sql_col]].copy()
             self.dataset.columns = ['natural_language', 'sql_query']
             
+            print(f"📊 Before cleaning: {len(self.dataset)} rows")
+            
             # Remove any empty rows
+            initial_size = len(self.dataset)
             self.dataset = self.dataset.dropna().reset_index(drop=True)
             
-            # Create TF-IDF vectors for similarity matching
-            self.vectorizer = TfidfVectorizer(
-                max_features=1000,
-                stop_words='english',
-                ngram_range=(1, 2)
-            )
+            # Remove rows where either column is empty string
+            self.dataset = self.dataset[
+                (self.dataset['natural_language'].str.strip() != '') & 
+                (self.dataset['sql_query'].str.strip() != '')
+            ].reset_index(drop=True)
             
-            self.query_vectors = self.vectorizer.fit_transform(
-                self.dataset['natural_language']
-            )
+            print(f"📊 After cleaning: {len(self.dataset)} rows (removed {initial_size - len(self.dataset)} empty rows)")
+            
+            if len(self.dataset) == 0:
+                print("❌ No valid data rows found after cleaning")
+                return False
+            
+            if len(self.dataset) < 5:
+                print(f"⚠️ Warning: Only {len(self.dataset)} valid rows found. Consider adding more data.")
+            
+            # Create TF-IDF vectors for similarity matching
+            try:
+                self.vectorizer = TfidfVectorizer(
+                    max_features=min(1000, len(self.dataset) * 10),  # Adjust based on dataset size
+                    stop_words='english',
+                    ngram_range=(1, 2),
+                    min_df=1,  # Important for small datasets
+                    max_df=0.95
+                )
+                
+                self.query_vectors = self.vectorizer.fit_transform(
+                    self.dataset['natural_language']
+                )
+                
+                print(f"✅ TF-IDF vectors created: {self.query_vectors.shape}")
+                
+            except Exception as e:
+                print(f"⚠️ TF-IDF creation failed: {str(e)}")
+                # Continue without TF-IDF - basic functionality will still work
+                self.vectorizer = None
+                self.query_vectors = None
             
             print(f"✅ Successfully loaded {len(self.dataset)} query pairs!")
             print(f"📊 Dataset shape: {self.dataset.shape}")
+            
+            # Show sample of loaded data
+            print("\n📝 Sample loaded data:")
+            for i, row in self.dataset.head(2).iterrows():
+                print(f"Row {i+1}:")
+                print(f"  NL: {row['natural_language'][:100]}...")
+                print(f"  SQL: {row['sql_query'][:100]}...")
+            
             return True
             
+        except pd.errors.EmptyDataError:
+            print("❌ Error: CSV file is empty")
+            return False
+        except pd.errors.ParserError as e:
+            print(f"❌ Error parsing CSV: {str(e)}")
+            print("💡 Try checking if your CSV has proper formatting")
+            return False
+        except UnicodeDecodeError as e:
+            print(f"❌ Error reading file encoding: {str(e)}")
+            print("💡 Try saving your CSV with UTF-8 encoding")
+            return False
         except Exception as e:
-            print(f"❌ Error loading dataset: {str(e)}")
+            print(f"❌ Unexpected error loading dataset: {str(e)}")
+            print(f"❌ Error type: {type(e).__name__}")
+            import traceback
+            print("🔍 Full traceback:")
+            traceback.print_exc()
             return False
     
     def find_similar_examples(self, query: str, n_examples: int = 3) -> List[Dict]:
         """Find similar queries from the dataset for few-shot learning"""
-        if self.dataset is None or self.vectorizer is None:
+        if self.dataset is None:
+            print("❌ No dataset loaded")
             return []
+            
+        if self.vectorizer is None or self.query_vectors is None:
+            print("⚠️ TF-IDF not available, returning random examples")
+            return self.get_random_examples(n_examples)
         
         try:
             # Transform the input query
@@ -206,18 +298,20 @@ class DatasetHandler:
             
             examples = []
             for idx in top_indices:
-                if similarities[idx] > 0.1:  # Only include reasonably similar examples
+                if similarities[idx] > 0.05:  # Lower threshold for small datasets
                     examples.append({
                         'natural_language': self.dataset.iloc[idx]['natural_language'],
                         'sql_query': self.dataset.iloc[idx]['sql_query'],
                         'similarity': similarities[idx]
                     })
             
+            print(f"🔍 Found {len(examples)} similar examples for query: '{query[:50]}...'")
             return examples
             
         except Exception as e:
             print(f"❌ Error finding similar examples: {str(e)}")
-            return []
+            # Fallback to random examples
+            return self.get_random_examples(n_examples)
     
     def get_random_examples(self, n_examples: int = 5) -> List[Dict]:
         """Get random examples from the dataset"""
@@ -247,8 +341,6 @@ class DatasetHandler:
         print(f"   Average SQL query length: {self.dataset['sql_query'].str.len().mean():.1f} chars")
         print(f"\n📋 Sample queries:")
         print(self.dataset.head())
-
-print("✅ Dataset Handler class defined!")
 
 class SQLValidator:
     """Basic SQL validation for OMOP queries"""
@@ -422,46 +514,122 @@ def main():
         uploaded_file = st.file_uploader(
             "Choose CSV file",
             type=['csv'],
-            help="CSV with columns: natural_language, sql_query"
+            help="CSV with columns: natural_language, sql_query (or similar names)"
         )
         
         if uploaded_file is not None:
             with st.spinner("🔄 Loading dataset..."):
-                # Create a temporary file path for the uploaded file
-                import tempfile
-                import os
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_path = tmp_file.name
-                
-                if dataset_handler.load_dataset(tmp_path):
-                    st.success(f"✅ Loaded {len(dataset_handler.dataset)} query pairs!")
+                try:
+                    # Debug info
+                    st.write(f"📁 File name: {uploaded_file.name}")
+                    st.write(f"📊 File size: {uploaded_file.size} bytes")
                     
-                    # Show dataset stats
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Query Pairs", len(dataset_handler.dataset))
-                    with col2:
-                        avg_length = dataset_handler.dataset['natural_language'].str.len().mean()
-                        st.metric("Avg NL Length", f"{avg_length:.0f} chars")
+                    # Reset file pointer to beginning
+                    uploaded_file.seek(0)
                     
-                    with st.expander("📋 Dataset Preview"):
-                        st.dataframe(
-                            dataset_handler.dataset.head(3),
-                            use_container_width=True
+                    # Try to load the dataset directly with the uploaded file
+                    if dataset_handler.load_dataset(uploaded_file):
+                        st.success(f"✅ Loaded {len(dataset_handler.dataset)} query pairs!")
+                        
+                        # Show dataset stats
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Query Pairs", len(dataset_handler.dataset))
+                        with col2:
+                            avg_length = dataset_handler.dataset['natural_language'].str.len().mean()
+                            st.metric("Avg NL Length", f"{avg_length:.0f} chars")
+                        
+                        with st.expander("📋 Dataset Preview"):
+                            st.dataframe(
+                                dataset_handler.dataset.head(3),
+                                use_container_width=True
+                            )
+                            
+                        # Show column detection info
+                        st.info(f"📋 Detected columns: '{uploaded_file.name}' appears to have natural language and SQL columns")
+                        
+                    else:
+                        st.error("❌ Failed to load dataset")
+                        
+                        # Provide debugging help
+                        st.write("🔍 **Debugging information:**")
+                        
+                        # Try to read and show first few lines
+                        try:
+                            uploaded_file.seek(0)
+                            content = uploaded_file.read().decode('utf-8')
+                            lines = content.split('\n')[:5]
+                            
+                            st.write("📝 **First 5 lines of your file:**")
+                            for i, line in enumerate(lines):
+                                if line.strip():
+                                    st.code(f"Line {i+1}: {line}")
+                                    
+                        except Exception as e:
+                            st.write(f"❌ Could not read file: {str(e)}")
+                        
+                        # Show expected format
+                        st.write("📋 **Expected CSV format:**")
+                        example_data = {
+                            'natural_language': ['Find patients with diabetes', 'Show hypertension cases'],
+                            'sql_query': ['SELECT * FROM...', 'SELECT * FROM...']
+                        }
+                        st.dataframe(pd.DataFrame(example_data))
+                        
+                        st.write("""
+                        **💡 Common issues:**
+                        - Column names should contain keywords like: question, query, natural, sql, answer
+                        - File should be properly formatted CSV
+                        - No empty rows at the beginning
+                        - UTF-8 encoding recommended
+                        """)
+                        
+                except Exception as e:
+                    st.error(f"❌ Error processing file: {str(e)}")
+                    st.write("🔍 **Error details:**")
+                    st.code(str(e))
+                    
+                    # Show troubleshooting tips
+                    with st.expander("🛠️ Troubleshooting Tips"):
+                        st.markdown("""
+                        **Try these solutions:**
+                        
+                        1. **Check file format:**
+                           - Save as CSV (UTF-8)
+                           - Remove any special characters
+                           - Ensure no empty rows at top
+                        
+                        2. **Check column names:**
+                           - Use simple names like: `question`, `sql`
+                           - Or: `natural_language`, `sql_query`
+                           - Avoid spaces or special characters
+                        
+                        3. **Check data:**
+                           - At least 2 columns required
+                           - No completely empty rows
+                           - Text should be properly quoted if contains commas
+                        
+                        4. **Test with sample:**
+                           Try uploading a simple 2-row CSV first
+                        """)
+                        
+                        # Provide a downloadable sample
+                        sample_csv = """natural_language,sql_query
+"Find patients with diabetes","SELECT DISTINCT p.person_id FROM person p JOIN condition_occurrence co ON p.person_id = co.person_id"
+"Show hypertension cases","SELECT * FROM condition_occurrence WHERE condition_concept_id = 316866"
+"""
+                        st.download_button(
+                            label="📥 Download Sample CSV Format",
+                            data=sample_csv,
+                            file_name="sample_omop_queries.csv",
+                            mime="text/csv"
                         )
-                else:
-                    st.error("❌ Failed to load dataset")
-                
-                # Clean up temp file
-                os.unlink(tmp_path)
         
         # About section
         st.divider()
         st.markdown("### 👨‍⚕️ About")
         st.markdown("""
-        Created by a Medical Doctor & Data Scientist
+        Created by Aleksey Zakharov Medical Doctor & Data Scientist
         
         **Features:**
         - Expert OMOP CDM knowledge
