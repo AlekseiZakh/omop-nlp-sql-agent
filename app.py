@@ -488,7 +488,7 @@ class MultiLLMTranslator:
             self.model_name = "gpt-4o"
         elif provider == LLMProvider.GOOGLE:
             genai.configure(api_key=api_key)
-            self.model_name = "gemini-1.5-pro"
+            self.model_name = "gemini-1.5-flash"
             self.model = genai.GenerativeModel(self.model_name)
         else:
             raise ValueError(f"Unsupported provider: {provider}")
