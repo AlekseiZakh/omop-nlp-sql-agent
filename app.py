@@ -695,7 +695,7 @@ def get_llm_provider_ui():
             """)
         else:
             st.markdown("""
-            **Gemini 1.5 Pro:**
+            **Gemini 1.5 Flash:**
             - 15 requests/minute free
             - 1500 requests/day free
             - Perfect for demos!
@@ -876,7 +876,7 @@ def main():
             provider_names = {
                 LLMProvider.ANTHROPIC: "🔥 Claude Sonnet 3.5",
                 LLMProvider.OPENAI: "🚀 GPT-4o", 
-                LLMProvider.GOOGLE: "🌟 Gemini 1.5 Pro"
+                LLMProvider.GOOGLE: "🌟 Gemini 1.5 Flash"
             }
             
             st.success(f"✅ Connected to {provider_names[provider]}")
@@ -943,7 +943,7 @@ def main():
                     ai_names = {
                         LLMProvider.ANTHROPIC: "Claude Sonnet 3.5",
                         LLMProvider.OPENAI: "GPT-4o",
-                        LLMProvider.GOOGLE: "Gemini 1.5 Pro"
+                        LLMProvider.GOOGLE: "Gemini 1.5 Flash"
                     }
                     
                     with st.spinner(f"🧠 {ai_names[provider]} is translating your query..."):
