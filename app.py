@@ -1,5 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
+import anthropic
+import openai
+from enum import Enum
 import pandas as pd
 import re
 from typing import Dict, List, Optional, Tuple
@@ -460,14 +463,35 @@ class SQLValidator:
         is_valid = len(warnings) == 0
         return is_valid, warnings
 
-class GoogleGeminiTranslator:
-    """Handles translation from natural language to OMOP SQL using Google Gemini"""
+class LLMProvider(Enum):
+    """Supported LLM providers"""
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    GOOGLE = "google"
+
+class MultiLLMTranslator:
+    """Handles translation using multiple LLM providers"""
     
-    def __init__(self, api_key: str, dataset_handler: Optional[DatasetHandler] = None):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
-        self.schema_handler = OMOPSchemaHandler()
+    def __init__(self, provider: LLMProvider, api_key: str, dataset_handler: Optional[DatasetHandler] = None):
+        self.provider = provider
+        self.api_key = api_key
         self.dataset_handler = dataset_handler
+        self.schema_handler = OMOPSchemaHandler()
+        self.model = None
+        
+        # Initialize the appropriate client
+        if provider == LLMProvider.ANTHROPIC:
+            self.client = anthropic.Anthropic(api_key=api_key)
+            self.model_name = "claude-3-5-sonnet-20241022"
+        elif provider == LLMProvider.OPENAI:
+            self.client = openai.OpenAI(api_key=api_key)
+            self.model_name = "gpt-4o"
+        elif provider == LLMProvider.GOOGLE:
+            genai.configure(api_key=api_key)
+            self.model_name = "gemini-1.5-pro"
+            self.model = genai.GenerativeModel(self.model_name)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
     
     def create_prompt(self, natural_query: str) -> str:
         """Creates a structured prompt for the LLM with few-shot examples"""
@@ -519,23 +543,165 @@ SQL Query:
         return prompt
     
     def translate_query(self, natural_query: str) -> Tuple[str, bool]:
-        """Translates natural language to SQL using Gemini"""
+        """Translates natural language to SQL using the selected LLM provider"""
         try:
             prompt = self.create_prompt(natural_query)
-            response = self.model.generate_content(prompt)
             
-            # Extract SQL from response
-            sql_query = response.text.strip()
+            if self.provider == LLMProvider.ANTHROPIC:
+                return self._translate_with_anthropic(prompt)
+            elif self.provider == LLMProvider.OPENAI:
+                return self._translate_with_openai(prompt)
+            elif self.provider == LLMProvider.GOOGLE:
+                return self._translate_with_google(prompt)
+            else:
+                return "Unsupported provider", False
+                
+        except Exception as e:
+            return f"Error generating SQL with {self.provider.value}: {str(e)}", False
+    
+    def _translate_with_anthropic(self, prompt: str) -> Tuple[str, bool]:
+        """Translate using Anthropic Claude"""
+        try:
+            response = self.client.messages.create(
+                model=self.model_name,
+                max_tokens=1000,
+                temperature=0.1,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
             
-            # Clean up the response (remove markdown formatting if present)
-            sql_query = re.sub(r'```sql\n?', '', sql_query)
-            sql_query = re.sub(r'```\n?', '', sql_query)
-            sql_query = sql_query.strip()
-            
+            sql_query = response.content[0].text.strip()
+            sql_query = self._clean_sql_response(sql_query)
             return sql_query, True
             
         except Exception as e:
-            return f"Error generating SQL: {str(e)}", False
+            return f"Anthropic API error: {str(e)}", False
+    
+    def _translate_with_openai(self, prompt: str) -> Tuple[str, bool]:
+        """Translate using OpenAI GPT"""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert OMOP CDM SQL developer. Generate only SQL queries without explanations."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.1
+            )
+            
+            sql_query = response.choices[0].message.content.strip()
+            sql_query = self._clean_sql_response(sql_query)
+            return sql_query, True
+            
+        except Exception as e:
+            return f"OpenAI API error: {str(e)}", False
+    
+    def _translate_with_google(self, prompt: str) -> Tuple[str, bool]:
+        """Translate using Google Gemini"""
+        try:
+            response = self.model.generate_content(prompt)
+            sql_query = response.text.strip()
+            sql_query = self._clean_sql_response(sql_query)
+            return sql_query, True
+            
+        except Exception as e:
+            return f"Google API error: {str(e)}", False
+    
+    def _clean_sql_response(self, sql_query: str) -> str:
+        """Clean up the SQL response by removing markdown formatting"""
+        # Remove markdown code blocks
+        sql_query = re.sub(r'```sql\n?', '', sql_query)
+        sql_query = re.sub(r'```\n?', '', sql_query)
+        sql_query = sql_query.strip()
+        
+        # Remove any explanatory text before/after the SQL
+        lines = sql_query.split('\n')
+        sql_lines = []
+        in_sql = False
+        
+        for line in lines:
+            line = line.strip()
+            if line.upper().startswith('SELECT') or line.upper().startswith('WITH'):
+                in_sql = True
+            if in_sql:
+                sql_lines.append(line)
+            # Stop if we hit explanatory text after SQL
+            if in_sql and line and not any(keyword in line.upper() for keyword in 
+                ['SELECT', 'FROM', 'WHERE', 'JOIN', 'AND', 'OR', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'WITH', '--']):
+                break
+        
+        return '\n'.join(sql_lines).strip() 
+        
+# Updated main function section for LLM provider selection
+def get_llm_provider_ui():
+    """Create the LLM provider selection UI"""
+    
+    st.markdown("### 🤖 AI Provider")
+    
+    # Provider selection
+    provider_options = {
+        "🔥 Anthropic Claude (Recommended)": LLMProvider.ANTHROPIC,
+        "🚀 OpenAI GPT-4": LLMProvider.OPENAI,
+        "🌟 Google Gemini": LLMProvider.GOOGLE
+    }
+    
+    selected_provider = st.selectbox(
+        "Choose AI Provider:",
+        list(provider_options.keys()),
+        help="Claude Sonnet performs best for complex SQL generation"
+    )
+    
+    provider = provider_options[selected_provider]
+    
+    # Provider-specific information
+    if provider == LLMProvider.ANTHROPIC:
+        st.info("💡 **Claude Sonnet** excels at complex SQL and OMOP queries")
+        api_help = "Get your Claude API key from [Anthropic Console](https://console.anthropic.com/)"
+        placeholder = "sk-ant-..."
+    elif provider == LLMProvider.OPENAI:
+        st.info("💡 **GPT-4** offers reliable SQL generation with good reasoning")
+        api_help = "Get your OpenAI API key from [OpenAI Platform](https://platform.openai.com/api-keys)"
+        placeholder = "sk-..."
+    else:  # Google
+        st.info("💡 **Gemini** provides fast, free SQL generation")
+        api_help = "Get your Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)"
+        placeholder = "AIza..."
+    
+    # API Key input
+    api_key = st.text_input(
+        "Enter your API key:",
+        type="password",
+        help=api_help,
+        placeholder=placeholder
+    )
+    
+    # Show pricing info
+    with st.expander("💰 Pricing Information"):
+        if provider == LLMProvider.ANTHROPIC:
+            st.markdown("""
+            **Claude Sonnet 3.5:**
+            - Input: $3 per 1M tokens
+            - Output: $15 per 1M tokens
+            - ~1000 queries ≈ $0.50
+            """)
+        elif provider == LLMProvider.OPENAI:
+            st.markdown("""
+            **GPT-4o:**
+            - Input: $2.50 per 1M tokens  
+            - Output: $10 per 1M tokens
+            - ~1000 queries ≈ $0.40
+            """)
+        else:
+            st.markdown("""
+            **Gemini 1.5 Pro:**
+            - 15 requests/minute free
+            - 1500 requests/day free
+            - Perfect for demos!
+            """)
+    
+    return provider, api_key
 
 def main():
     """Main Streamlit application optimized for Streamlit Cloud"""
@@ -562,27 +728,8 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # API Key input with better instructions
-        st.markdown("### 🔑 Google Gemini API Key")
-        api_key = st.text_input(
-            "Enter your API key:",
-            type="password",
-            help="Get your free API key from Google AI Studio"
-        )
-        
-        if not api_key:
-            st.info("👆 Enter your API key to get started")
-            with st.expander("📝 How to get a free API key"):
-                st.markdown("""
-                1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
-                2. Sign in with your Google account
-                3. Click "Create API Key"
-                4. Copy and paste it above
-                
-                **Free tier includes:**
-                - 15 requests per minute
-                - Perfect for portfolio demos!
-                """)
+        # LLM Provider Selection
+        provider, api_key = get_llm_provider_ui()
         
         st.divider()
         
@@ -708,10 +855,10 @@ def main():
         st.divider()
         st.markdown("### 👨‍⚕️ About")
         st.markdown("""
-        Created by Aleksey Zakharov 
-        Medical Doctor & Data Scientist
+        Created by Aleksey Zakharov Medical Doctor & Data Scientist
         
         **Features:**
+        - Multiple AI providers (Claude, GPT-4, Gemini)
         - Expert OMOP CDM knowledge
         - Hierarchical concept relationships
         - Few-shot learning with your data
@@ -720,187 +867,209 @@ def main():
     
     # Main interface
     if api_key:
-        translator = GoogleGeminiTranslator(api_key, dataset_handler)
-        validator = SQLValidator()
-        
-        # Show examples section
-        if dataset_handler.dataset is not None:
-            st.subheader("📝 Examples from your dataset:")
-            examples = dataset_handler.get_random_examples(4)
+        try:
+            # Initialize the multi-LLM translator
+            translator = MultiLLMTranslator(provider, api_key, dataset_handler)
+            validator = SQLValidator()
             
-            cols = st.columns(len(examples))
-            for i, example in enumerate(examples):
-                with cols[i]:
-                    # Truncate long queries for button display
-                    display_text = example['natural_language']
-                    if len(display_text) > 50:
-                        display_text = display_text[:47] + "..."
-                    
-                    if st.button(
-                        f"📋 Example {i+1}", 
-                        key=f"dataset_example_{i}",
-                        help=example['natural_language'],
-                        use_container_width=True
-                    ):
-                        st.session_state.query_input = example['natural_language']
-        else:
-            # Default examples
-            st.subheader("📝 Try these example queries:")
-            example_queries = [
-                "Find all patients with diabetes diagnosed in the last 2 years",
-                "Show patients over 65 with hypertension", 
-                "List patients who had a heart attack and their current medications",
-                "Count patients by gender and race"
-            ]
+            # Show which provider is being used
+            provider_names = {
+                LLMProvider.ANTHROPIC: "🔥 Claude Sonnet 3.5",
+                LLMProvider.OPENAI: "🚀 GPT-4o", 
+                LLMProvider.GOOGLE: "🌟 Gemini 1.5 Pro"
+            }
             
-            cols = st.columns(len(example_queries))
-            for i, example in enumerate(example_queries):
-                with cols[i]:
-                    if st.button(
-                        f"📋 Example {i+1}", 
-                        key=f"example_{i}",
-                        help=example,
-                        use_container_width=True
-                    ):
-                        st.session_state.query_input = example
-        
-        st.divider()
-        
-        # Query input section
-        st.subheader("💬 Enter Your Query")
-        query_input = st.text_area(
-            "Natural language query:",
-            value=st.session_state.get('query_input', ''),
-            height=120,
-            placeholder="e.g., Find all patients with diabetes who are over 65 years old and taking metformin",
-            help="Describe what you want to find in plain English"
-        )
-        
-        # Translate button
-        if st.button("🔄 Translate to SQL", type="primary", use_container_width=True):
-            if not query_input.strip():
-                st.error("Please enter a query first!")
-            else:
-                with st.spinner("🧠 Translating your query..."):
-                    # Show similar examples if dataset is loaded
-                    if dataset_handler.dataset is not None:
-                        similar_examples = dataset_handler.find_similar_examples(query_input, 3)
-                        if similar_examples:
-                            with st.expander("🔍 Similar examples from your dataset (used for context)"):
-                                for i, example in enumerate(similar_examples, 1):
-                                    similarity_color = "🟢" if example['similarity'] > 0.5 else "🟡" if example['similarity'] > 0.3 else "🔴"
-                                    st.write(f"{similarity_color} **Example {i}** (similarity: {example['similarity']:.2f})")
-                                    st.write(f"*Query:* {example['natural_language']}")
-                                    st.code(example['sql_query'], language="sql")
-                                    if i < len(similar_examples):
-                                        st.divider()
-                    
-                    # Generate SQL
-                    sql_query, success = translator.translate_query(query_input)
-                    
-                    if success:
-                        # Validate the generated SQL
-                        is_valid, warnings = validator.validate_sql(sql_query)
-                        
-                        st.subheader("🎯 Generated SQL Query:")
-                        st.code(sql_query, language="sql")
-                        
-                        # Show validation results
-                        col1, col2 = st.columns([2, 1])
-                        with col1:
-                            if is_valid:
-                                st.success("✅ SQL query validation passed!")
-                            else:
-                                st.warning("⚠️ Potential issues detected:")
-                                for warning in warnings:
-                                    st.write(f"• {warning}")
-                        
-                        with col2:
-                            # Copy button (visual feedback)
-                            if st.button("📋 Copy SQL", help="Click to select and copy"):
-                                st.success("✅ Ready to copy!")
-                        
-                        # Additional query info
-                        with st.expander("📊 Query Analysis"):
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("SQL Length", f"{len(sql_query)} chars")
-                            with col2:
-                                table_count = len([table for table in ['person', 'condition_occurrence', 'drug_exposure', 'procedure_occurrence', 'measurement'] if table in sql_query.lower()])
-                                st.metric("Tables Used", table_count)
-                            with col3:
-                                has_hierarchy = "concept_ancestor" in sql_query.lower()
-                                st.metric("Uses Hierarchy", "✅" if has_hierarchy else "❌")
-                            
-                            if has_hierarchy:
-                                st.info("🎯 Great! This query uses concept_ancestor for proper hierarchical relationships.")
-                            else:
-                                st.warning("💡 Consider if this query should use concept_ancestor for more comprehensive results.")
-                        
-                    else:
-                        st.error(f"❌ Translation failed: {sql_query}")
-        
-        # Evaluation section if dataset is loaded
-        if dataset_handler.dataset is not None:
-            st.divider()
-            with st.expander("🧪 Evaluate Model Performance"):
-                st.markdown("Test the model against your expert-written queries")
+            st.success(f"✅ Connected to {provider_names[provider]}")
+            
+            # Show examples section
+            if dataset_handler.dataset is not None:
+                st.subheader("📝 Examples from your dataset:")
+                examples = dataset_handler.get_random_examples(4)
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    n_samples = st.slider("Number of test samples:", 1, 10, 3)
-                with col2:
-                    if st.button("🚀 Run Evaluation"):
-                        sample_queries = dataset_handler.get_random_examples(n_samples)
+                cols = st.columns(len(examples))
+                for i, example in enumerate(examples):
+                    with cols[i]:
+                        # Truncate long queries for button display
+                        display_text = example['natural_language']
+                        if len(display_text) > 50:
+                            display_text = display_text[:47] + "..."
                         
-                        for i, example in enumerate(sample_queries, 1):
-                            st.write(f"**Test Case {i}:**")
-                            st.write(f"*Input:* {example['natural_language']}")
+                        if st.button(
+                            f"📋 Example {i+1}", 
+                            key=f"dataset_example_{i}",
+                            help=example['natural_language'],
+                            use_container_width=True
+                        ):
+                            st.session_state.query_input = example['natural_language']
+            else:
+                # Default examples
+                st.subheader("📝 Try these example queries:")
+                example_queries = [
+                    "Find all patients with diabetes diagnosed in the last 2 years",
+                    "Show patients over 65 with hypertension", 
+                    "List patients who had a heart attack and their current medications",
+                    "Count patients by gender and race"
+                ]
+                
+                cols = st.columns(len(example_queries))
+                for i, example in enumerate(example_queries):
+                    with cols[i]:
+                        if st.button(
+                            f"📋 Example {i+1}", 
+                            key=f"example_{i}",
+                            help=example,
+                            use_container_width=True
+                        ):
+                            st.session_state.query_input = example
+            
+            st.divider()
+            
+            # Query input section
+            st.subheader("💬 Enter Your Query")
+            query_input = st.text_area(
+                "Natural language query:",
+                value=st.session_state.get('query_input', ''),
+                height=120,
+                placeholder="e.g., Find all patients with diabetes who are over 65 years old and taking metformin",
+                help="Describe what you want to find in plain English"
+            )
+            
+            # Translate button
+            if st.button("🔄 Translate to SQL", type="primary", use_container_width=True):
+                if not query_input.strip():
+                    st.error("Please enter a query first!")
+                else:
+                    # Show which AI is being used
+                    ai_names = {
+                        LLMProvider.ANTHROPIC: "Claude Sonnet 3.5",
+                        LLMProvider.OPENAI: "GPT-4o",
+                        LLMProvider.GOOGLE: "Gemini 1.5 Pro"
+                    }
+                    
+                    with st.spinner(f"🧠 {ai_names[provider]} is translating your query..."):
+                        # Show similar examples if dataset is loaded
+                        if dataset_handler.dataset is not None:
+                            similar_examples = dataset_handler.find_similar_examples(query_input, 3)
+                            if similar_examples:
+                                with st.expander("🔍 Similar examples from your dataset (used for context)"):
+                                    for i, example in enumerate(similar_examples, 1):
+                                        similarity_color = "🟢" if example['similarity'] > 0.5 else "🟡" if example['similarity'] > 0.3 else "🔴"
+                                        st.write(f"{similarity_color} **Example {i}** (similarity: {example['similarity']:.2f})")
+                                        st.write(f"*Query:* {example['natural_language']}")
+                                        st.code(example['sql_query'], language="sql")
+                                        if i < len(similar_examples):
+                                            st.divider()
+                        
+                        # Generate SQL
+                        sql_query, success = translator.translate_query(query_input)
+                        
+                        if success:
+                            # Validate the generated SQL
+                            is_valid, warnings = validator.validate_sql(sql_query)
                             
-                            col_expert, col_generated = st.columns(2)
+                            st.subheader(f"🎯 Generated SQL Query (via {ai_names[provider]}):")
+                            st.code(sql_query, language="sql")
                             
-                            with col_expert:
-                                st.write("**Your Expert SQL:**")
-                                st.code(example['sql_query'], language="sql")
-                            
-                            with col_generated:
-                                st.write("**Generated SQL:**")
-                                generated_sql, success = translator.translate_query(example['natural_language'])
-                                if success:
-                                    st.code(generated_sql, language="sql")
-                                    
-                                    # Simple similarity check
-                                    similarity = len(set(generated_sql.lower().split()) & set(example['sql_query'].lower().split())) / max(len(set(generated_sql.lower().split())), len(set(example['sql_query'].lower().split())))
-                                    
-                                    if similarity > 0.6:
-                                        st.success(f"🎯 Good match! ({similarity:.1%} similarity)")
-                                    elif similarity > 0.3:
-                                        st.warning(f"⚠️ Partial match ({similarity:.1%} similarity)")
-                                    else:
-                                        st.error(f"❌ Low match ({similarity:.1%} similarity)")
+                            # Show validation results
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                if is_valid:
+                                    st.success("✅ SQL query validation passed!")
                                 else:
-                                    st.error("Failed to generate")
+                                    st.warning("⚠️ Potential issues detected:")
+                                    for warning in warnings:
+                                        st.write(f"• {warning}")
                             
-                            if i < len(sample_queries):
-                                st.divider()
-        
-        # Schema reference
-        with st.expander("📚 OMOP CDM Schema Reference"):
-            st.markdown("### Core Tables Overview")
-            schema_handler = OMOPSchemaHandler()
+                            with col2:
+                                # Copy button (visual feedback)
+                                if st.button("📋 Copy SQL", help="Click to select and copy"):
+                                    st.success("✅ Ready to copy!")
+                            
+                            # Additional query info
+                            with st.expander("📊 Query Analysis"):
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("SQL Length", f"{len(sql_query)} chars")
+                                with col2:
+                                    table_count = len([table for table in ['person', 'condition_occurrence', 'drug_exposure', 'procedure_occurrence', 'measurement'] if table in sql_query.lower()])
+                                    st.metric("Tables Used", table_count)
+                                with col3:
+                                    has_hierarchy = "concept_ancestor" in sql_query.lower()
+                                    st.metric("Uses Hierarchy", "✅" if has_hierarchy else "❌")
+                                
+                                if has_hierarchy:
+                                    st.info("🎯 Great! This query uses concept_ancestor for proper hierarchical relationships.")
+                                else:
+                                    st.warning("💡 Consider if this query should use concept_ancestor for more comprehensive results.")
+                            
+                        else:
+                            st.error(f"❌ Translation failed: {sql_query}")
             
-            # Create tabs for better organization
-            tab_names = list(schema_handler.omop_tables.keys())
-            tabs = st.tabs([t.replace('_', ' ').title() for t in tab_names])
+            # Evaluation section if dataset is loaded
+            if dataset_handler.dataset is not None:
+                st.divider()
+                with st.expander("🧪 Evaluate Model Performance"):
+                    st.markdown("Test the model against your expert-written queries")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        n_samples = st.slider("Number of test samples:", 1, 10, 3)
+                    with col2:
+                        if st.button("🚀 Run Evaluation"):
+                            sample_queries = dataset_handler.get_random_examples(n_samples)
+                            
+                            for i, example in enumerate(sample_queries, 1):
+                                st.write(f"**Test Case {i}:**")
+                                st.write(f"*Input:* {example['natural_language']}")
+                                
+                                col_expert, col_generated = st.columns(2)
+                                
+                                with col_expert:
+                                    st.write("**Your Expert SQL:**")
+                                    st.code(example['sql_query'], language="sql")
+                                
+                                with col_generated:
+                                    st.write("**Generated SQL:**")
+                                    generated_sql, success = translator.translate_query(example['natural_language'])
+                                    if success:
+                                        st.code(generated_sql, language="sql")
+                                        
+                                        # Simple similarity check
+                                        similarity = len(set(generated_sql.lower().split()) & set(example['sql_query'].lower().split())) / max(len(set(generated_sql.lower().split())), len(set(example['sql_query'].lower().split())))
+                                        
+                                        if similarity > 0.6:
+                                            st.success(f"🎯 Good match! ({similarity:.1%} similarity)")
+                                        elif similarity > 0.3:
+                                            st.warning(f"⚠️ Partial match ({similarity:.1%} similarity)")
+                                        else:
+                                            st.error(f"❌ Low match ({similarity:.1%} similarity)")
+                                    else:
+                                        st.error("Failed to generate")
+                                
+                                if i < len(sample_queries):
+                                    st.divider()
             
-            for tab, table_name in zip(tabs, tab_names):
-                with tab:
-                    table_info = schema_handler.omop_tables[table_name]
-                    st.write(f"**{table_info['description']}**")
-                    st.write(f"**Primary Key:** `{table_info['primary_key']}`")
-                    st.write("**Columns:**")
-                    for col in table_info['columns']:
-                        st.write(f"• `{col}`")
+            # Schema reference
+            with st.expander("📚 OMOP CDM Schema Reference"):
+                st.markdown("### Core Tables Overview")
+                schema_handler = OMOPSchemaHandler()
+                
+                # Create tabs for better organization
+                tab_names = list(schema_handler.omop_tables.keys())
+                tabs = st.tabs([t.replace('_', ' ').title() for t in tab_names])
+                
+                for tab, table_name in zip(tabs, tab_names):
+                    with tab:
+                        table_info = schema_handler.omop_tables[table_name]
+                        st.write(f"**{table_info['description']}**")
+                        st.write(f"**Primary Key:** `{table_info['primary_key']}`")
+                        st.write("**Columns:**")
+                        for col in table_info['columns']:
+                            st.write(f"• `{col}`")
+            
+        except Exception as e:
+            st.error(f"❌ Failed to initialize {provider.value}: {str(e)}")
+            st.info("💡 Please check your API key and try again")
     
     else:
         # Landing page when no API key
@@ -949,7 +1118,7 @@ AND de.drug_concept_id IN (
         with col1:
             st.markdown("""
             **🧠 Smart Translation**
-            - Uses Google Gemini AI
+            - Multiple AI providers
             - Understands medical terminology
             - Handles complex queries
             """)
@@ -970,7 +1139,7 @@ AND de.drug_concept_id IN (
             - Performance evaluation
             """)
         
-        st.info("👈 **Get started:** Enter your Google Gemini API key in the sidebar!")
+        st.info("👈 **Get started:** Choose an AI provider and enter your API key in the sidebar!")
 
 if __name__ == "__main__":
     main()
