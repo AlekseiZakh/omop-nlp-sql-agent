@@ -139,6 +139,144 @@ class DatasetHandler:
         self.dataset = None
         self.vectorizer = None
         self.query_vectors = None
+        self.dataset_source = None  # NEW: Track dataset source
+    
+    def load_default_dataset(self) -> bool:
+        """Load the built-in OHDSI dataset from file"""
+        try:
+            # Try to load the default dataset file from common locations
+            default_file_paths = [
+                'data/ohdsi.csv',     
+            ]
+            
+            for file_path in default_file_paths:
+                try:
+                    print(f"🔍 Looking for default dataset at: {file_path}")
+                    success = self.load_dataset(file_path)
+                    if success:
+                        self.dataset_source = f"OHDSI Community Dataset ({len(self.dataset)} queries)"
+                        print(f"✅ Loaded default dataset from: {file_path}")
+                        return True
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    print(f"⚠️ Could not load {file_path}: {str(e)}")
+                    continue
+            
+            # If no file found, create a minimal default dataset
+            print("⚠️ No OHDSI dataset file found, creating minimal examples")
+            return self._create_minimal_dataset()
+            
+        except Exception as e:
+            print(f"❌ Error in load_default_dataset: {str(e)}")
+            return self._create_minimal_dataset()
+    
+    def _create_minimal_dataset(self) -> bool:
+        """Create a small set of example queries if no file is found"""
+        try:
+            from io import StringIO
+            
+            # Minimal CSV content as fallback
+            minimal_csv = """natural_language,sql_query
+"Find all patients with Type 2 diabetes","SELECT DISTINCT p.person_id FROM person p JOIN condition_occurrence co ON p.person_id = co.person_id WHERE co.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 201826)"
+"Show patients diagnosed with hypertension","SELECT DISTINCT p.person_id, co.condition_start_date FROM person p JOIN condition_occurrence co ON p.person_id = co.person_id WHERE co.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 316866)"
+"Count patients by gender","SELECT CASE WHEN p.gender_concept_id = 8507 THEN 'Male' ELSE 'Female' END as gender, COUNT(*) as patient_count FROM person p GROUP BY gender_concept_id"
+"List all drug exposures for metformin","SELECT de.person_id, de.drug_exposure_start_date, de.quantity FROM drug_exposure de WHERE de.drug_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 1503297)"
+"Find patients with both diabetes and hypertension","SELECT DISTINCT p.person_id FROM person p JOIN condition_occurrence co1 ON p.person_id = co1.person_id JOIN condition_occurrence co2 ON p.person_id = co2.person_id WHERE co1.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 201820) AND co2.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 316866)"
+"""
+            
+            # Use your existing load_dataset method with StringIO
+            csv_file = StringIO(minimal_csv)
+            success = self._load_from_stringio(csv_file)
+            if success:
+                self.dataset_source = "Built-in Examples (5 queries)"
+                print("✅ Created minimal dataset with 5 example queries")
+                return True
+            return False
+            
+        except Exception as e:
+            print(f"❌ Error creating minimal dataset: {str(e)}")
+            return False
+    
+    def _load_from_stringio(self, csv_content) -> bool:
+        """Helper method to load from StringIO (keeps your existing logic)"""
+        try:
+            df = pd.read_csv(csv_content)
+            
+            # Use the same column detection logic from your existing method
+            possible_nl_cols = ['natural_language', 'nl_query', 'question', 'query', 'natural_query', 'input', 'text']
+            possible_sql_cols = ['sql', 'sql_query', 'omop_sql', 'answer', 'sql_answer', 'output', 'target']
+            
+            nl_col = None
+            sql_col = None
+            
+            # Try exact matches first
+            for col in df.columns:
+                try:
+                    col_lower = str(col).lower().strip()
+                    if col_lower in possible_nl_cols:
+                        nl_col = col
+                    elif col_lower in possible_sql_cols:
+                        sql_col = col
+                except:
+                    continue
+            
+            # If auto-detection fails, use first two columns
+            if nl_col is None or sql_col is None:
+                columns = df.columns.tolist()
+                if len(columns) < 2:
+                    return False
+                nl_col = columns[0]
+                sql_col = columns[1]
+            
+            # Create the cleaned dataset (same as your existing logic)
+            self.dataset = df[[nl_col, sql_col]].copy()
+            self.dataset.columns = ['natural_language', 'sql_query']
+            
+            # Clean the data
+            self.dataset['natural_language'] = self.dataset['natural_language'].astype(str)
+            self.dataset['sql_query'] = self.dataset['sql_query'].astype(str)
+            
+            self.dataset = self.dataset[
+                (self.dataset['natural_language'].str.lower() != 'nan') & 
+                (self.dataset['sql_query'].str.lower() != 'nan') &
+                (self.dataset['natural_language'].str.strip() != '') & 
+                (self.dataset['sql_query'].str.strip() != '')
+            ].reset_index(drop=True)
+            
+            if len(self.dataset) == 0:
+                return False
+            
+            # Create TF-IDF vectors (same as your existing logic)
+            try:
+                clean_texts = []
+                for text in self.dataset['natural_language']:
+                    try:
+                        clean_text = str(text).encode('utf-8', errors='ignore').decode('utf-8')
+                        clean_texts.append(clean_text)
+                    except:
+                        clean_texts.append('generic query')
+                
+                self.vectorizer = TfidfVectorizer(
+                    max_features=min(1000, len(self.dataset) * 10),
+                    stop_words='english',
+                    ngram_range=(1, 2),
+                    min_df=1,
+                    max_df=0.95
+                )
+                
+                self.query_vectors = self.vectorizer.fit_transform(clean_texts)
+                
+            except Exception as e:
+                print(f"⚠️ TF-IDF creation failed: {str(e)}")
+                self.vectorizer = None
+                self.query_vectors = None
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error in _load_from_stringio: {str(e)}")
+            return False
     
     def load_dataset(self, csv_file_or_path) -> bool:
         """Load the CSV dataset with natural language and SQL pairs"""
@@ -173,6 +311,11 @@ class DatasetHandler:
                 if df is None:
                     print("❌ Could not read file with any supported encoding")
                     return False
+                    
+                # Set source for uploaded files
+                if not hasattr(self, 'dataset_source') or self.dataset_source is None:
+                    self.dataset_source = "User Upload"
+                    
             else:
                 # It's a file path
                 # Try different encodings for file path
@@ -193,6 +336,10 @@ class DatasetHandler:
                 if df is None:
                     print("❌ Could not read file with any supported encoding")
                     return False
+                
+                # Set source for file path loads (if not already set by load_default_dataset)
+                if not hasattr(self, 'dataset_source') or self.dataset_source is None:
+                    self.dataset_source = f"File: {csv_file_or_path}"
             
             print(f"📊 Original dataset shape: {df.shape}")
             print(f"📋 Original columns: {list(df.columns)}")
