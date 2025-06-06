@@ -880,135 +880,203 @@ def main():
         
         st.divider()
         
-        # Dataset upload section
-        st.header("📊 Your Dataset (Optional)")
-        st.markdown("Upload your custom NL-to-SQL pairs to improve accuracy")
+        # NEW: Enhanced Dataset Selection
+        st.header("📊 Dataset Selection")
         
-        uploaded_file = st.file_uploader(
-            "Choose CSV file",
-            type=['csv'],
-            help="CSV with columns: natural_language, sql_query (or similar names)"
+        dataset_option = st.radio(
+            "Choose dataset source:",
+            [
+                "🌟 OHDSI Community Dataset", 
+                "📤 Upload Your Own Dataset",
+                "🚫 No Dataset (Basic Mode)"
+            ],
+            help="Community dataset provides immediate functionality with expert examples"
         )
         
-        if uploaded_file is not None:
-            with st.spinner("🔄 Loading dataset..."):
-                try:
-                    # Debug info
-                    st.write(f"📁 File name: {uploaded_file.name}")
-                    st.write(f"📊 File size: {uploaded_file.size} bytes")
-                    
-                    # Reset file pointer to beginning
-                    uploaded_file.seek(0)
-                    
-                    # Try to load the dataset directly with the uploaded file
-                    if dataset_handler.load_dataset(uploaded_file):
-                        st.success(f"✅ Loaded {len(dataset_handler.dataset)} query pairs!")
+        if dataset_option.startswith("🌟"):
+            # Load default dataset
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                if st.button("📥 Load Community Dataset", type="secondary", use_container_width=True):
+                    with st.spinner("Loading community dataset..."):
+                        if dataset_handler.load_default_dataset():
+                            st.success(f"✅ Loaded {len(dataset_handler.dataset)} community query pairs!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to load dataset")
+            
+            with col2:
+                # Info button
+                if st.button("ℹ️ Info", use_container_width=True):
+                    st.info("Expected CSV format: natural_language, sql_query")
+            
+            # Show info about default dataset
+            with st.expander("📋 About Community Dataset"):
+                st.markdown("""
+                **Source:** OHDSI Community Examples  
+                **Content:** Expert-written OMOP CDM queries  
+                **Coverage:** Demographics, conditions, drugs, procedures, measurements  
+                **Benefits:** 
+                - Immediate functionality
+                - Community-validated patterns  
+                - Professional query examples
+                """)
+        
+        elif dataset_option.startswith("📤"):
+            # Custom upload (your existing functionality)
+            st.markdown("**Upload your CSV with columns:** `natural_language`, `sql_query`")
+            
+            uploaded_file = st.file_uploader(
+                "Choose CSV file",
+                type=['csv'],
+                help="CSV with natural language queries and corresponding OMOP SQL"
+            )
+            
+            if uploaded_file is not None:
+                with st.spinner("🔄 Loading your dataset..."):
+                    try:
+                        # Debug info
+                        st.write(f"📁 File name: {uploaded_file.name}")
+                        st.write(f"📊 File size: {uploaded_file.size} bytes")
                         
-                        # Show dataset stats
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Query Pairs", len(dataset_handler.dataset))
-                        with col2:
-                            avg_length = dataset_handler.dataset['natural_language'].str.len().mean()
-                            st.metric("Avg NL Length", f"{avg_length:.0f} chars")
+                        # Reset file pointer to beginning
+                        uploaded_file.seek(0)
                         
-                        with st.expander("📋 Dataset Preview"):
-                            st.dataframe(
-                                dataset_handler.dataset.head(3),
-                                use_container_width=True
-                            )
+                        # Try to load the dataset directly with the uploaded file
+                        if dataset_handler.load_dataset(uploaded_file):
+                            st.success(f"✅ Loaded {len(dataset_handler.dataset)} query pairs!")
                             
-                        # Show column detection info
-                        st.info(f"📋 Detected columns: '{uploaded_file.name}' appears to have natural language and SQL columns")
-                        
-                    else:
-                        st.error("❌ Failed to load dataset")
-                        
-                        # Provide debugging help
-                        st.write("🔍 **Debugging information:**")
-                        
-                        # Try to read and show first few lines
-                        try:
-                            uploaded_file.seek(0)
-                            content = uploaded_file.read().decode('utf-8')
-                            lines = content.split('\n')[:5]
+                            # Show dataset stats
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Query Pairs", len(dataset_handler.dataset))
+                            with col2:
+                                avg_length = dataset_handler.dataset['natural_language'].str.len().mean()
+                                st.metric("Avg NL Length", f"{avg_length:.0f} chars")
                             
-                            st.write("📝 **First 5 lines of your file:**")
-                            for i, line in enumerate(lines):
-                                if line.strip():
-                                    st.code(f"Line {i+1}: {line}")
-                                    
-                        except Exception as e:
-                            st.write(f"❌ Could not read file: {str(e)}")
+                            with st.expander("📋 Dataset Preview"):
+                                st.dataframe(
+                                    dataset_handler.dataset.head(3),
+                                    use_container_width=True
+                                )
+                                
+                            # Show column detection info
+                            st.info(f"📋 Detected columns: '{uploaded_file.name}' appears to have natural language and SQL columns")
+                            
+                        else:
+                            st.error("❌ Failed to load dataset")
+                            
+                            # Provide debugging help
+                            st.write("🔍 **Debugging information:**")
+                            
+                            # Try to read and show first few lines
+                            try:
+                                uploaded_file.seek(0)
+                                content = uploaded_file.read().decode('utf-8')
+                                lines = content.split('\n')[:5]
+                                
+                                st.write("📝 **First 5 lines of your file:**")
+                                for i, line in enumerate(lines):
+                                    if line.strip():
+                                        st.code(f"Line {i+1}: {line}")
+                                        
+                            except Exception as e:
+                                st.write(f"❌ Could not read file: {str(e)}")
+                            
+                            # Show expected format
+                            st.write("📋 **Expected CSV format:**")
+                            example_data = {
+                                'natural_language': ['Find patients with diabetes', 'Show hypertension cases'],
+                                'sql_query': ['SELECT * FROM...', 'SELECT * FROM...']
+                            }
+                            st.dataframe(pd.DataFrame(example_data))
+                            
+                            st.write("""
+                            **💡 Common issues:**
+                            - Column names should contain keywords like: question, query, natural, sql, answer
+                            - File should be properly formatted CSV
+                            - No empty rows at the beginning
+                            - UTF-8 encoding recommended
+                            """)
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error processing file: {str(e)}")
+                        st.write("🔍 **Error details:**")
+                        st.code(str(e))
                         
-                        # Show expected format
-                        st.write("📋 **Expected CSV format:**")
-                        example_data = {
-                            'natural_language': ['Find patients with diabetes', 'Show hypertension cases'],
-                            'sql_query': ['SELECT * FROM...', 'SELECT * FROM...']
-                        }
-                        st.dataframe(pd.DataFrame(example_data))
-                        
-                        st.write("""
-                        **💡 Common issues:**
-                        - Column names should contain keywords like: question, query, natural, sql, answer
-                        - File should be properly formatted CSV
-                        - No empty rows at the beginning
-                        - UTF-8 encoding recommended
-                        """)
-                        
-                except Exception as e:
-                    st.error(f"❌ Error processing file: {str(e)}")
-                    st.write("🔍 **Error details:**")
-                    st.code(str(e))
-                    
-                    # Show troubleshooting tips
-                    with st.expander("🛠️ Troubleshooting Tips"):
-                        st.markdown("""
-                        **Try these solutions:**
-                        
-                        1. **Check file format:**
-                           - Save as CSV (UTF-8)
-                           - Remove any special characters
-                           - Ensure no empty rows at top
-                        
-                        2. **Check column names:**
-                           - Use simple names like: `question`, `sql`
-                           - Or: `natural_language`, `sql_query`
-                           - Avoid spaces or special characters
-                        
-                        3. **Check data:**
-                           - At least 2 columns required
-                           - No completely empty rows
-                           - Text should be properly quoted if contains commas
-                        
-                        4. **Test with sample:**
-                           Try uploading a simple 2-row CSV first
-                        """)
-                        
-                        # Provide a downloadable sample
-                        sample_csv = """natural_language,sql_query
+                        # Show troubleshooting tips
+                        with st.expander("🛠️ Troubleshooting Tips"):
+                            st.markdown("""
+                            **Try these solutions:**
+                            
+                            1. **Check file format:**
+                               - Save as CSV (UTF-8)
+                               - Remove any special characters
+                               - Ensure no empty rows at top
+                            
+                            2. **Check column names:**
+                               - Use simple names like: `question`, `sql`
+                               - Or: `natural_language`, `sql_query`
+                               - Avoid spaces or special characters
+                            
+                            3. **Check data:**
+                               - At least 2 columns required
+                               - No completely empty rows
+                               - Text should be properly quoted if contains commas
+                            
+                            4. **Test with sample:**
+                               Try uploading a simple 2-row CSV first
+                            """)
+                            
+                            # Provide a downloadable sample
+                            sample_csv = """natural_language,sql_query
 "Find patients with diabetes","SELECT DISTINCT p.person_id FROM person p JOIN condition_occurrence co ON p.person_id = co.person_id"
 "Show hypertension cases","SELECT * FROM condition_occurrence WHERE condition_concept_id = 316866"
 """
-                        st.download_button(
-                            label="📥 Download Sample CSV Format",
-                            data=sample_csv,
-                            file_name="sample_omop_queries.csv",
-                            mime="text/csv"
-                        )
+                            st.download_button(
+                                label="📥 Download Sample CSV Format",
+                                data=sample_csv,
+                                file_name="sample_omop_queries.csv",
+                                mime="text/csv"
+                            )
+        
+        else:
+            # No dataset mode
+            st.info("💡 Running in basic mode - AI will use general OMOP knowledge without examples")
+            if dataset_handler.dataset is not None:
+                if st.button("🗑️ Clear Current Dataset"):
+                    dataset_handler.dataset = None
+                    dataset_handler.vectorizer = None
+                    dataset_handler.query_vectors = None
+                    dataset_handler.dataset_source = None
+                    st.rerun()
+        
+        # Show current dataset status
+        if dataset_handler.dataset is not None:
+            st.success(f"📊 **Active:** {dataset_handler.dataset_source}")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Queries", len(dataset_handler.dataset))
+            with col2:
+                avg_length = dataset_handler.dataset['natural_language'].str.len().mean()
+                st.metric("Avg Length", f"{avg_length:.0f}")
+            with col3:
+                similarity_available = "✅" if dataset_handler.vectorizer else "❌"
+                st.metric("Smart Search", similarity_available)
+        
+        st.divider()
         
         # About section
-        st.divider()
         st.markdown("### 👨‍⚕️ About")
         st.markdown("""
         Created by Aleksey Zakharov Medical Doctor & Data Scientist
         
         **Features:**
         - Multiple AI providers (Claude, GPT-4, Gemini)
+        - OHDSI community dataset (200+ queries)
         - Expert OMOP CDM knowledge
         - Hierarchical concept relationships
-        - Few-shot learning with your data
+        - Few-shot learning capabilities
         - SQL validation & safety checks
         """)
     
