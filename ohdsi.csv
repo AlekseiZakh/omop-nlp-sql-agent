@@ -1,0 +1,4386 @@
+﻿Natlanguage_query,SQL_query
+CS01 Care site place of service counts,"SELECT
+    cs.place_of_service_concept_id,
+    COUNT(*) AS places_of_service_count
+FROM cdm.care_site AS cs
+GROUP BY cs.place_of_service_concept_id
+ORDER BY cs.place_of_service_concept_id
+;"
+CS02 Patient count per care site place of service.,"SELECT
+    cs.place_of_service_concept_id,
+    COUNT(*) AS num_patients
+FROM cdm.care_site AS cs
+    JOIN cdm.person AS p ON p.care_site_id = cs.care_site_id
+GROUP BY cs.place_of_service_concept_id
+ORDER BY cs.place_of_service_concept_id
+;"
+CE01 Min/max/average length of condition," WITH descendant_concepts AS  (
+SELECT DISTINCT ca.descendant_concept_id, c.concept_name
+  FROM cdm.concept_ancestor ca
+  JOIN cdm.concept c
+    ON c.concept_id = ca.descendant_concept_id
+ WHERE c.concept_code = '161891005'  /* SNOMED concept code for back pain */
+), surgery as (
+SELECT p.person_id,
+       p.procedure_date,
+       1 AS surgery
+  FROM cdm.procedure_occurrence p
+  JOIN cdm.concept c
+    ON c.concept_id = p.procedure_concept_id
+ WHERE c.vocabulary_id = 'CPT4'
+   AND c.concept_code IN( '22851','20936','22612','22523','22630','22614',
+                          '22842','22632','20930','22524','27130','22525' )
+), drug as (
+SELECT p.person_id,
+       p.procedure_date AS drug_date,
+       1 AS drug
+  FROM cdm.procedure_occurrence p
+  JOIN cdm.concept c
+    ON c.concept_id = p.procedure_concept_id
+ WHERE c.vocabulary_id = 'CPT4'
+   AND c.concept_code IN ('20610','20552','207096','20553','20550','20605' ,'20551','20600','23350')
+ UNION
+SELECT person_id,
+       drug_era_start_date,
+       1
+  FROM cdm.drug_era
+ WHERE drug_concept_id IN (1125315, 778711, 1115008, 1177480, 1112807, 1506270)
+), pt as (
+SELECT p.person_id,
+       p.procedure_date AS pt_date,
+       1 AS pt
+  FROM cdm.procedure_occurrence p
+  JOIN cdm.concept c
+    ON c.concept_id = p.procedure_concept_id
+ WHERE c.vocabulary_id = 'CPT4'
+   AND c.concept_code IN ('97001', '97140', '97002')
+ UNION
+SELECT p.person_id,
+       p.procedure_date AS pt_date,
+       1 AS pt
+  FROM cdm.procedure_occurrence p
+  JOIN cdm.concept c
+    ON c.concept_id = p.procedure_concept_id
+ WHERE c.vocabulary_id = 'HCPCS'
+   AND c.concept_code = 'G0283'
+), era_data as (
+SELECT era.person_id,
+       era.condition_era_start_date AS diag_date ,
+       DATEDIFF(d,era.condition_era_start_date,era.condition_era_end_date) AS condition_days,
+       ISNULL(drug,0) AS drug,
+       ISNULL(surgery,0) AS surgery ,
+       ISNULL(pt,0) AS pt
+  FROM cdm.condition_era era
+  JOIN descendant_concepts dc
+    ON dc.descendant_concept_id = era.condition_concept_id
+  LEFT JOIN surgery s
+    ON s.person_id = era.person_id
+   AND (s.procedure_date >= era.condition_era_start_date AND s.procedure_date <= DATEADD(d,60,era.condition_era_start_date))
+  LEFT JOIN drug d
+    ON d.person_id = era.person_id
+   AND (d.drug_date >= era.condition_era_start_date AND d.drug_date <= DATEADD(d,60,era.condition_era_start_date))
+  LEFT JOIN pt
+    ON pt.person_id = era.person_id
+   AND (pt.pt_date >= era.condition_era_start_date AND pt.pt_date <= DATEADD(d,60,era.condition_era_start_date))
+)  
+SELECT treatment,
+       COUNT(*)            AS count_value,
+       MIN(condition_days) AS min_condition_days,
+       MAX(condition_days) AS max_condition_days,
+       AVG(condition_days) AS avg_condition_days
+  FROM (
+SELECT person_id,
+       diag_date ,
+       CASE WHEN MAX(surgery) = 1 THEN 'Surgery'
+            WHEN MAX(drug)    = 1 AND MAX(pt)  = 1 THEN 'PT Rx'
+            WHEN MAX(drug)    = 1 THEN 'Rx Only'
+            ELSE 'No Treatment'
+       END AS treatment,            
+       MAX(condition_days) AS condition_days
+  FROM era_data
+ GROUP BY person_id, diag_date
+       ) TMP
+ GROUP BY treatment
+ ORDER BY treatment;"
+CE02 Age/gender of patients with condition,"WITH hip_fracture AS (
+SELECT DISTINCT ca.descendant_concept_id
+  FROM cdm.concept c
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c.concept_id
+ WHERE c.concept_code = '359817006'  
+)
+SELECT gender,
+       age,
+       COUNT(*) AS num_patients
+  FROM (
+SELECT DISTINCT p.person_id,
+                c.concept_name  AS gender,
+                YEAR(ce.condition_era_start_date) - p.year_of_birth AS age
+  FROM cdm.condition_era ce
+  JOIN hip_fracture hf  
+    ON hf.descendant_concept_id = ce.condition_concept_id
+  JOIN cdm.person p
+    ON p.person_id = ce.person_id
+  JOIN cdm.concept c
+    ON c.concept_id = p.gender_concept_id
+       ) TMP
+ GROUP BY gender, age
+ ORDER BY gender, age;"
+"CE03 Min/max, average length of condition stratified by age/gender","WITH hip_fracture  AS (
+SELECT DISTINCT ca.descendant_concept_id
+  FROM cdm.concept c
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c.concept_id
+ WHERE c.concept_code = '359817006'
+), people_with_hip_fracture AS (
+SELECT DISTINCT
+       p.person_id,
+       c.concept_name AS gender,
+       YEAR(ce.condition_era_start_date) - p.year_of_birth AS age,
+       DATEDIFF(d,ce.condition_era_start_date,ce.condition_era_end_date) + 1 AS duration,
+       (YEAR(ce.condition_era_start_date) - p.year_of_birth)/10 AS age_grp
+  FROM cdm.condition_era ce
+  JOIN hip_fracture hf  
+    ON hf.descendant_concept_id = ce.condition_concept_id
+  JOIN cdm.person p
+    ON p.person_id = ce.person_id
+  JOIN cdm.concept c
+    ON c.concept_id = p.gender_concept_id
+)
+SELECT gender,
+       CASE
+         WHEN age_grp = 0 THEN '0-9'
+         WHEN age_grp = 1 THEN '10-19'
+         WHEN age_grp = 2 THEN '20-29'
+         WHEN age_grp = 3 THEN '30-39'
+         WHEN age_grp = 4 THEN '40-49'
+         WHEN age_grp = 5 THEN '50-59'
+         WHEN age_grp = 6 THEN '60-69'
+         WHEN age_grp = 7 THEN '70-79'
+         WHEN age_grp = 8 THEN '80-89'
+         WHEN age_grp = 9 THEN '90-99'
+         WHEN age_grp > 9 THEN '100+'
+       END           AS age_grp,
+       COUNT(*)      AS num_patients,
+       MIN(duration) AS min_duration_count,
+       MAX(duration) AS max_duration_count,
+       AVG(duration) AS avg_duration_count
+  FROM people_with_hip_fracture
+ GROUP BY gender, age_grp
+ ORDER BY gender, age_grp;"
+"CE04 Conditions, stratified by year, age group and gender","WITH age_age_grp (age, age_grp) AS (
+SELECT 1, '0 to 9' UNION ALL
+SELECT 2, '0 to 9' UNION ALL
+SELECT 3, '0 to 9' UNION ALL
+SELECT 4, '0 to 9' UNION ALL
+SELECT 5, '0 to 9' UNION ALL
+SELECT 6, '0 to 9' UNION ALL
+SELECT 7, '0 to 9' UNION ALL
+SELECT 8, '0 to 9' UNION ALL
+SELECT 9, '0 to 9' UNION ALL
+SELECT 10, '10 to 19' UNION ALL
+SELECT 11, '10 to 19' UNION ALL
+SELECT 12, '10 to 19' UNION ALL
+SELECT 13, '10 to 19' UNION ALL
+SELECT 14, '10 to 19' UNION ALL
+SELECT 15, '10 to 19' UNION ALL
+SELECT 16, '10 to 19' UNION ALL
+SELECT 17, '10 to 19' UNION ALL
+SELECT 18, '10 to 19' UNION ALL
+SELECT 19, '10 to 19' UNION ALL
+SELECT 20, '20 to 29' UNION ALL
+SELECT 21, '20 to 29' UNION ALL
+SELECT 22, '20 to 29' UNION ALL
+SELECT 23, '20 to 29' UNION ALL
+SELECT 24, '20 to 29' UNION ALL
+SELECT 25, '20 to 29' UNION ALL
+SELECT 26, '20 to 29' UNION ALL
+SELECT 27, '20 to 29' UNION ALL
+SELECT 28, '20 to 29' UNION ALL
+SELECT 29, '20 to 29' UNION ALL
+SELECT 30, '30 to 39' UNION ALL
+SELECT 31, '30 to 39' UNION ALL
+SELECT 32, '30 to 39' UNION ALL
+SELECT 33, '30 to 39' UNION ALL
+SELECT 34, '30 to 39' UNION ALL
+SELECT 35, '30 to 39' UNION ALL
+SELECT 36, '30 to 39' UNION ALL
+SELECT 37, '30 to 39' UNION ALL
+SELECT 38, '30 to 39' UNION ALL
+SELECT 39, '30 to 39' UNION ALL
+SELECT 40, '40 to 49' UNION ALL
+SELECT 41, '40 to 49' UNION ALL
+SELECT 42, '40 to 49' UNION ALL
+SELECT 43, '40 to 49' UNION ALL
+SELECT 44, '40 to 49' UNION ALL
+SELECT 45, '40 to 49' UNION ALL
+SELECT 46, '40 to 49' UNION ALL
+SELECT 47, '40 to 49' UNION ALL
+SELECT 48, '40 to 49' UNION ALL
+SELECT 49, '40 to 49' UNION ALL
+SELECT 50, '50 to 59' UNION ALL
+SELECT 51, '50 to 59' UNION ALL
+SELECT 52, '50 to 59' UNION ALL
+SELECT 53, '50 to 59' UNION ALL
+SELECT 54, '50 to 59' UNION ALL
+SELECT 55, '50 to 59' UNION ALL
+SELECT 56, '50 to 59' UNION ALL
+SELECT 57, '50 to 59' UNION ALL
+SELECT 58, '50 to 59' UNION ALL
+SELECT 59, '50 to 59' UNION ALL
+SELECT 60, '60 to 69' UNION ALL
+SELECT 61, '60 to 69' UNION ALL
+SELECT 62, '60 to 69' UNION ALL
+SELECT 63, '60 to 69' UNION ALL
+SELECT 64, '60 to 69' UNION ALL
+SELECT 65, '60 to 69' UNION ALL
+SELECT 66, '60 to 69' UNION ALL
+SELECT 67, '60 to 69' UNION ALL
+SELECT 68, '60 to 69' UNION ALL
+SELECT 69, '60 to 69' UNION ALL
+SELECT 70, '70 to 79' UNION ALL
+SELECT 71, '70 to 79' UNION ALL
+SELECT 72, '70 to 79' UNION ALL
+SELECT 73, '70 to 79' UNION ALL
+SELECT 74, '70 to 79' UNION ALL
+SELECT 75, '70 to 79' UNION ALL
+SELECT 76, '70 to 79' UNION ALL
+SELECT 77, '70 to 79' UNION ALL
+SELECT 78, '70 to 79' UNION ALL
+SELECT 79, '70 to 79' UNION ALL
+SELECT 80, '80 to 89' UNION ALL
+SELECT 81, '80 to 89' UNION ALL
+SELECT 82, '80 to 89' UNION ALL
+SELECT 83, '80 to 89' UNION ALL
+SELECT 84, '80 to 89' UNION ALL
+SELECT 85, '80 to 89' UNION ALL
+SELECT 86, '80 to 89' UNION ALL
+SELECT 87, '80 to 89' UNION ALL
+SELECT 88, '80 to 89' UNION ALL
+SELECT 89, '80 to 89' UNION ALL
+SELECT 90, '90 to 99' UNION ALL
+SELECT 91, '90 to 99' UNION ALL
+SELECT 92, '90 to 99' UNION ALL
+SELECT 93, '90 to 99' UNION ALL
+SELECT 94, '90 to 99' UNION ALL
+SELECT 95, '90 to 99' UNION ALL
+SELECT 96, '90 to 99' UNION ALL
+SELECT 97, '90 to 99' UNION ALL
+SELECT 98, '90 to 99' UNION ALL
+SELECT 99, '90 to 99' UNION ALL
+SELECT 100, '100 to 109' UNION ALL
+SELECT 101, '100 to 109' UNION ALL
+SELECT 102, '100 to 109' UNION ALL
+SELECT 103, '100 to 109' UNION ALL
+SELECT 104, '100 to 109' UNION ALL
+SELECT 105, '100 to 109' UNION ALL
+SELECT 106, '100 to 109' UNION ALL
+SELECT 107, '100 to 109' UNION ALL
+SELECT 108, '100 to 109' UNION ALL
+SELECT 109, '100 to 109' UNION ALL
+SELECT 110, '110 to 119' UNION ALL
+SELECT 111, '110 to 119' UNION ALL
+SELECT 112, '110 to 119' UNION ALL
+SELECT 113, '110 to 119' UNION ALL
+SELECT 114, '110 to 119' UNION ALL
+SELECT 115, '110 to 119' UNION ALL
+SELECT 116, '110 to 119' UNION ALL
+SELECT 117, '110 to 119' UNION ALL
+SELECT 118, '110 to 119' UNION ALL
+SELECT 119, '110 to 119'
+)
+SELECT condition,
+       year,
+       age_group,
+       gender,
+       COUNT(*) AS count_value
+  FROM (
+SELECT p.person_id,
+       c1.concept_name AS condition,
+       YEAR(ce.condition_era_start_date ) AS year,
+       c2.concept_name AS gender,
+       YEAR(ce.condition_era_start_date ) - p.year_of_birth AS age,
+       aag.age_grp AS age_group
+  FROM cdm.condition_era ce
+  JOIN cdm.concept c1
+    ON c1.concept_id = ce.condition_concept_id
+  JOIN cdm.person p
+    ON p.person_id = ce.person_id
+  JOIN cdm.concept c2
+    ON c2.concept_id = p.gender_concept_id
+  JOIN age_age_grp aag
+    ON aag.age = YEAR(ce.condition_era_start_date ) - p.year_of_birth
+       ) TMP
+ GROUP BY condition,year,age_group,gender
+ ORDER BY condition,year,age_group,gender;"
+CE05 Conditions that are seasonally dependent,"WITH asthma AS (
+SELECT DISTINCT c2.concept_id AS snomed_asthma
+  FROM cdm.concept c1
+  JOIN cdm.concept_relationship cr
+    ON c1.concept_id = cr.concept_id_1
+   AND cr.relationship_id = 'Maps to'
+  JOIN cdm.concept c2
+    ON cr.concept_id_2 = c2.concept_id
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c2.concept_id   
+ WHERE c1.concept_code LIKE '493.0%'
+)
+SELECT season, COUNT(*) AS cases
+  FROM (
+SELECT CASE WHEN MONTH(ce.condition_era_start_date) IN (12,1,2)
+            THEN 'Winter'
+
+            WHEN MONTH(ce.condition_era_start_date) IN (3,4,5)
+            THEN 'Spring'
+
+            WHEN MONTH(ce.condition_era_start_date) IN (6,7,8)
+            THEN 'Summer'
+
+            WHEN MONTH(ce.condition_era_start_date) IN (9,10,11)
+            THEN 'Fall'
+       END AS season
+  FROM cdm.condition_era ce
+  JOIN asthma a
+    ON a.snomed_asthma = ce.condition_concept_id
+       ) TMP
+ GROUP BY season;"
+CE06 Conditions most likely to result in death,"SELECT concept_name, COUNT(*) as conditions_count
+FROM  (
+SELECT d.person_id, c.concept_name
+  FROM cdm.death d
+  JOIN cdm.condition_era ce
+    ON ce.person_id = d.person_id
+   AND DATEDIFF(d,ce.condition_era_end_date,d.death_date) <= 30
+  JOIN cdm.concept c
+    ON c.concept_id = ce.condition_concept_id
+       ) TMP
+GROUP BY concept_name
+ORDER BY conditions_count DESC;"
+CE07 Comorbidities of patient with condition,"WITH snomed_diabetes AS (
+SELECT ca.descendant_concept_id AS snomed_diabetes_id
+  FROM cdm.concept c
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c.concept_id
+ WHERE c.concept_code = '73211009'
+),  people_with_diabetes AS (
+SELECT ce.person_id,
+       MIN(ce.condition_era_start_date) AS onset_date
+  FROM cdm.condition_era ce
+  JOIN snomed_diabetes sd
+    ON sd.snomed_diabetes_id = ce.condition_concept_id
+ GROUP BY ce.person_id
+), non_diabetic AS (
+SELECT person_id,
+       condition_concept_id,
+       condition_era_start_date
+  FROM cdm.condition_era
+ WHERE condition_concept_id NOT IN (SELECT snomed_diabetes_id FROM snomed_diabetes)
+)
+SELECT c.concept_name AS comorbidity,
+       COUNT(DISTINCT diabetic.person_id) AS frequency        
+  FROM people_with_diabetes diabetic
+  JOIN non_diabetic comorb
+    ON comorb.person_id = diabetic.person_id
+   AND comorb.condition_era_start_date > diabetic.onset_date
+  JOIN cdm.concept c
+    ON c.concept_id = comorb.condition_concept_id
+ GROUP BY c.concept_name
+ ORDER BY frequency DESC;"
+CE08 Number of comorbidity for patients with condition,"-- Limiting to one month and one year for performance purposes
+WITH snomed_diabetes AS (
+SELECT ca.descendant_concept_id AS snomed_diabetes_id
+  FROM cdm.concept c
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c.concept_id
+ WHERE c.concept_code = '73211009'
+),  people_with_diabetes AS (
+SELECT ce.person_id,
+       MIN(ce.condition_era_start_date) AS onset_date
+  FROM cdm.condition_era ce
+  JOIN snomed_diabetes sd
+    ON sd.snomed_diabetes_id = ce.condition_concept_id
+ WHERE YEAR(ce.condition_era_start_date) = 2008
+   AND MONTH(ce.condition_era_start_date) = 1
+ GROUP BY ce.person_id
+), non_diabetic AS (
+SELECT person_id,
+       condition_concept_id,
+       condition_era_start_date
+  FROM cdm.condition_era
+ WHERE condition_concept_id NOT IN (SELECT snomed_diabetes_id FROM snomed_diabetes)
+   AND YEAR(condition_era_start_date) = 2008
+   AND MONTH(condition_era_start_date) = 1
+), comorbidities_by_person AS (
+SELECT diabetic.person_id,
+       COUNT(DISTINCT comorb.condition_concept_id) AS comorbidities         
+  FROM people_with_diabetes diabetic
+  JOIN non_diabetic comorb
+    ON comorb.person_id = diabetic.person_id
+   AND comorb.condition_era_start_date > diabetic.onset_date
+  JOIN cdm.concept c
+    ON c.concept_id = comorb.condition_concept_id
+ GROUP BY diabetic.person_id
+), ordered_data AS (
+SELECT comorbidities,
+       DENSE_RANK()OVER(ORDER BY comorbidities) order_nr,
+       MIN(comorbidities)OVER() AS min_value,
+       MAX(comorbidities)OVER() AS max_value,
+       AVG(comorbidities)OVER() AS avg_value
+  FROM comorbidities_by_person
+)
+SELECT min_value,max_value,avg_value,
+       MIN(CASE WHEN order_nr < .25 * max_value THEN 999999999999 ELSE comorbidities END) AS pct_25,
+       MIN(CASE WHEN order_nr < .50 * max_value THEN 999999999999 ELSE comorbidities END) AS median,
+       MIN(CASE WHEN order_nr < .75 * max_value THEN 999999999999 ELSE comorbidities END) AS pct_75
+  FROM ordered_data
+ GROUP BY min_value,max_value,avg_value;"
+CE09 Counts of condition record,"SELECT ce.condition_concept_id, c.concept_name, COUNT(*) AS records_count
+  FROM cdm.condition_era ce
+  JOIN cdm.concept c
+    ON c.concept_id = ce.condition_concept_id
+ WHERE ce.condition_concept_id
+    IN /* top five condition concepts */
+       ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY ce.condition_concept_id, c.concept_name
+ ORDER BY records_count DESC;"
+CE10 Counts of persons with conditions,"SELECT ce.condition_concept_id, c.concept_name, COUNT(DISTINCT person_id) AS num_people
+  FROM cdm.condition_era ce
+  JOIN cdm.concept c
+    ON c.concept_id = ce.condition_concept_id
+ WHERE ce.condition_concept_id
+    IN /* top five condition concepts by number of people */
+        ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY ce.condition_concept_id, c.concept_name
+ ORDER BY num_people DESC;"
+CE11 Distribution of condition era end dates,"WITH ordered_data AS (
+SELECT condition_concept_id,
+       condition_era_end_date,
+       ROW_NUMBER() OVER (PARTITION BY condition_concept_id ORDER BY condition_era_end_date) order_nr,
+       COUNT(*) OVER (PARTITION BY condition_concept_id) AS population_size
+  FROM cdm.condition_era
+ WHERE condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+), percentiles AS (
+SELECT condition_concept_id,
+       MIN(CASE WHEN order_nr < .25 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_end_date END) AS pct_25,
+       MIN(CASE WHEN order_nr < .50 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_end_date END) AS median,
+       MIN(CASE WHEN order_nr < .75 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_end_date END) AS pct_75
+  FROM ordered_data
+ GROUP BY condition_concept_id
+), aggregates AS (
+SELECT condition_concept_id,
+       MIN(condition_era_end_date) AS min_end_date,
+       MAX(condition_era_end_date) AS max_end_date,
+       -- Julian Date arithmetic doesn't seem natively supported by all RDBMS,
+       -- using days since Jan 1 of Year 1 ('0001-01-01','YYYY-MM-DD') instead.
+       DATEADD(d,AVG(CAST(DATEDIFF(day,DATEFROMPARTS(1,1,1),condition_era_end_date) AS FLOAT)),DATEFROMPARTS(1,1,1)) AS avg_end_date,
+       ROUND(STDEV(CAST(DATEDIFF(day,DATEFROMPARTS(1,1,1),condition_era_end_date) AS FLOAT)),0) AS std_dev_days
+  FROM cdm.condition_era
+ WHERE condition_concept_id IN  ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY condition_concept_id
+ )
+ SELECT a.condition_concept_id, a.min_end_date, a.max_end_date, a.avg_end_date, a.std_dev_days, p.pct_25, p.median, p.pct_75
+   FROM aggregates a
+   JOIN percentiles p
+     ON a.condition_concept_id = p.condition_concept_id
+  ORDER BY a.condition_concept_id;"
+CE12 Distribution of condition era start dates,"WITH ordered_data AS (
+SELECT condition_concept_id,
+       condition_era_start_date,
+       ROW_NUMBER() OVER (PARTITION BY condition_concept_id ORDER BY condition_era_start_date) order_nr,
+       COUNT(*) OVER (PARTITION BY condition_concept_id) AS population_size
+  FROM cdm.condition_era
+ WHERE condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+), percentiles AS (
+SELECT condition_concept_id,
+       MIN(CASE WHEN order_nr < .25 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_start_date END) AS pct_25,
+       MIN(CASE WHEN order_nr < .50 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_start_date END) AS median,
+       MIN(CASE WHEN order_nr < .75 * population_size THEN DATEFROMPARTS(9999,1,1) ELSE condition_era_start_date END) AS pct_75
+  FROM ordered_data
+ GROUP BY condition_concept_id
+), aggregates AS (
+SELECT condition_concept_id,
+       MIN(condition_era_start_date) AS min_start_date,
+       MAX(condition_era_start_date) AS max_start_date,
+       -- Julian Date arithmetic doesn't seem natively supported by all RDBMS,
+       -- using days since Jan 1 of Year 1 ('0001-01-01','YYYY-MM-DD') instead.
+       DATEADD(d,AVG(CAST(DATEDIFF(day,DATEFROMPARTS(1,1,1),condition_era_start_date) AS FLOAT)),DATEFROMPARTS(1,1,1)) AS avg_start_date,
+       ROUND(STDEV(CAST(DATEDIFF(day,DATEFROMPARTS(1,1,1),condition_era_start_date) AS FLOAT)),0) AS std_dev_days
+  FROM cdm.condition_era
+ WHERE condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY condition_concept_id
+ )
+ SELECT a.condition_concept_id, a.min_start_date, a.max_start_date, a.avg_start_date, a.std_dev_days, p.pct_25, p.median, p.pct_75
+   FROM aggregates a
+   JOIN percentiles p
+     ON a.condition_concept_id = p.condition_concept_id
+  ORDER BY a.condition_concept_id;"
+CE13 Distribution of condition occurrence count,"WITH count_data AS (
+SELECT condition_concept_id, COUNT(*) AS condition_occurrence_count
+  FROM cdm.condition_era
+ WHERE condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY condition_concept_id
+), ordered_data AS (
+SELECT condition_concept_id, condition_occurrence_count,
+       ROW_NUMBER()OVER(ORDER BY condition_occurrence_count) AS order_nr
+  FROM count_data
+)
+SELECT condition_concept_id,
+       condition_occurrence_count,
+       MIN(condition_occurrence_count)over() AS min_count,
+       MAX(condition_occurrence_count)over() AS max_count,
+       AVG(condition_occurrence_count)over() AS avg_count,
+       ROUND(STDEV(condition_occurrence_count)over(),0) AS stdev_count,
+       MAX(CASE WHEN order_nr = 2 then condition_occurrence_count else 0 END)OVER() AS percentile_25,
+       MAX(CASE WHEN order_nr = 3 then condition_occurrence_count else 0 END)OVER() AS median,
+       MAX(CASE WHEN order_nr = 4 then condition_occurrence_count else 0 END)OVER() AS percentile_75
+  FROM ordered_data;"
+"CE16 Distribution of condition era length, stratified by condition and condition type","WITH count_data AS (
+SELECT ce.condition_concept_id, co.condition_type_concept_id, COUNT(*) AS condition_occurrence_count
+  FROM cdm.condition_era ce
+  JOIN cdm.condition_occurrence co
+    ON ce.condition_concept_id = co.condition_concept_id
+   AND ce.person_id            = co.person_id
+ WHERE ce.condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+ GROUP BY ce.condition_concept_id, co.condition_type_concept_id
+), ordered_data AS (
+SELECT condition_concept_id, condition_type_concept_id, condition_occurrence_count,
+       ROW_NUMBER()OVER(PARTITION BY condition_type_concept_id ORDER BY condition_occurrence_count) AS order_nr,
+       COUNT(*)OVER(PARTITION BY condition_type_concept_id) AS population_size
+  FROM count_data
+)
+SELECT condition_concept_id,
+       condition_type_concept_id,
+       condition_occurrence_count,
+       MIN(condition_occurrence_count)over(PARTITION BY condition_type_concept_id) AS min_count,
+       MAX(condition_occurrence_count)over(PARTITION BY condition_type_concept_id) AS max_count,
+       AVG(condition_occurrence_count)over(PARTITION BY condition_type_concept_id) AS avg_count,
+       ROUND(STDEV(condition_occurrence_count)over(PARTITION BY condition_type_concept_id),0) AS stdev_count,
+       MIN(CASE WHEN order_nr < .25 * population_size then 9999999999 else condition_occurrence_count END)OVER(PARTITION BY condition_type_concept_id) AS percentile_25,
+       MIN(CASE WHEN order_nr < .50 * population_size then 9999999999 else condition_occurrence_count END)OVER(PARTITION BY condition_type_concept_id) AS median,
+       MIN(CASE WHEN order_nr < .75 * population_size then 9999999999 else condition_occurrence_count END)OVER(PARTITION BY condition_type_concept_id) AS percentile_75
+  FROM ordered_data
+ ORDER BY condition_type_concept_id, condition_concept_id;"
+"CE17 Distribution of condition occurrence count, stratified by condition and condition type","WITH count_data AS (
+SELECT DISTINCT
+       ce.condition_concept_id,
+       co.condition_type_concept_id,
+       COUNT(*) OVER (PARTITION BY ce.condition_concept_id, ce.person_id) AS occurrences
+  FROM cdm.condition_era ce
+  JOIN cdm.condition_occurrence co
+    ON ce.condition_concept_id = co.condition_concept_id
+   AND ce.person_id            = co.person_id
+ WHERE ce.condition_concept_id IN ( 256723, 372906, 440377, 441202, 435371 )
+), ordered_data AS (
+SELECT condition_concept_id,condition_type_concept_id,occurrences,
+       ROW_NUMBER()OVER(PARTITION BY condition_type_concept_id ORDER BY occurrences) AS order_nr,
+       COUNT(*)OVER(PARTITION BY condition_type_concept_id) AS population_size
+  FROM count_data
+)
+SELECT DISTINCT
+       condition_concept_id,
+       condition_type_concept_id,
+       MIN(occurrences)over(PARTITION BY condition_type_concept_id) AS min_count,
+       MAX(occurrences)over(PARTITION BY condition_type_concept_id) AS max_count,
+       AVG(occurrences)over(PARTITION BY condition_type_concept_id) AS avg_count,
+       ROUND(STDEV(occurrences)over(PARTITION BY condition_type_concept_id),0) AS stdev_count,
+       MIN(CASE WHEN order_nr < .25 * population_size then 9999999999 else occurrences END)OVER(PARTITION BY condition_type_concept_id) AS percentile_25,
+       MIN(CASE WHEN order_nr < .50 * population_size then 9999999999 else occurrences END)OVER(PARTITION BY condition_type_concept_id) AS median,
+       MIN(CASE WHEN order_nr < .75 * population_size then 9999999999 else occurrences END)OVER(PARTITION BY condition_type_concept_id) AS percentile_75
+  FROM ordered_data
+ ORDER BY condition_type_concept_id, condition_concept_id;"
+CO01 How long does a condition last.,"SELECT
+  DATEDIFF(day,ca.condition_era_start_date, ca.condition_era_end_date) + 1 AS num_condition_duration_days,
+  count(*)                                                                 AS condition_duration_freq_count
+FROM cdm.condition_era ca
+INNER JOIN cdm.concept c
+ON ca.condition_concept_id = c.concept_id
+WHERE c.concept_id = 200219
+GROUP BY  c.concept_id,
+          c.concept_name,
+          DATEDIFF(day,condition_era_start_date, ca.condition_era_end_date)
+ORDER BY 1;"
+CO02 How to determine the onset of a condition.,"SELECT
+  MIN(condition_start_date) AS onset_condition_date
+FROM cdm.condition_occurrence
+WHERE condition_concept_id = 23988 
+      AND   EXISTS (SELECT 1 FROM cdm.observation_period op 
+                    WHERE op.person_id = condition_occurrence.person_id
+                          AND  DATEADD(month,6,op.observation_period_start_date) < condition_occurrence.condition_start_date)
+;"
+CO03 What is specialty that diagnosed a condition.,"SELECT
+  concept_name          AS Specialty,
+  specialty_freq        AS Specialty_freq
+FROM  
+  ( SELECT
+      specialty_concept_id,
+      COUNT(*)          AS specialty_freq
+      FROM
+        ( SELECT
+            specialty_concept_id,
+            from_cond.provider_id
+          FROM
+            (SELECT
+                provider_id
+             FROM cdm.condition_occurrence
+             -- Input condition_concept_id
+             WHERE condition_concept_id = 31967
+                   AND provider_id IS NOT NULL
+            ) AS from_cond
+          LEFT JOIN
+            ( SELECT
+                provider_id       AS provider_id_from_prov,
+                specialty_concept_id
+              FROM cdm.provider
+            ) AS from_prov
+          ON from_cond.provider_id=from_prov.provider_id_from_prov
+        ) AS prov_cond_spec
+      GROUP BY specialty_concept_id
+  ) AS spec_id_count
+LEFT JOIN
+  (SELECT
+    concept_id,
+    concept_name
+   FROM cdm.concept
+  ) AS spec_concept
+ON spec_id_count.specialty_concept_id = spec_concept.concept_id
+ORDER BY specialty_freq DESC;"
+CO04 Count In what place of service where condition diagnoses.,"SELECT
+  concept_name AS place_of_service_name,
+  place_freq
+FROM
+  (SELECT
+    care_site_id,
+    count(*)  AS place_freq
+    FROM
+      (SELECT
+        care_site_id
+      FROM
+        (SELECT
+          visit_occurrence_id
+          FROM cdm.condition_occurrence
+          WHERE condition_concept_id = 31967 -- Input condition
+                AND visit_occurrence_id IS NOT NULL
+        ) AS from_cond
+      LEFT JOIN
+        (SELECT
+          visit_occurrence_id,
+          care_site_id
+         FROM cdm.visit_occurrence
+        ) AS from_visit
+      ON from_cond.visit_occurrence_id=from_visit.visit_occurrence_id
+      ) AS from_cond_visit
+    GROUP BY care_site_id
+  ) AS place_id_count
+
+  LEFT JOIN
+
+  (SELECT
+    concept_id,
+    concept_name
+   FROM cdm.concept
+  ) AS place_concept
+  ON place_id_count.care_site_id=place_concept.concept_id
+ORDER BY place_freq;"
+"CO05 Breakout of condition by gender, age","SELECT
+  concept_name AS gender,
+  age,
+  gender_age_freq
+FROM 
+  (SELECT
+    gender_concept_id,
+    age,
+    COUNT(1) gender_age_freq
+   FROM 
+    (SELECT
+      year_of_birth,
+      month_of_birth,
+      day_of_birth,
+      gender_concept_id,
+      condition_start_date,
+      YEAR(condition_start_date) - year_of_birth    AS age
+     FROM 
+      (SELECT
+        person_id,
+        condition_start_date
+       FROM cdm.condition_occurrence
+       WHERE condition_concept_id = 31967 -- Input condition_concept_id 
+             AND person_id IS NOT NULL
+      ) AS from_cond
+    LEFT JOIN cdm.person from_person 
+      ON from_cond.person_id=from_person.person_id 
+  ) AS gender_count
+  GROUP BY
+    gender_concept_id,
+    age
+  ) AS gender_id_age_count
+LEFT JOIN cdm.concept concept_list 
+  ON gender_id_age_count.gender_concept_id=concept_list.concept_id
+ORDER BY gender_age_freq DESC;"
+CO06 What are a person's comorbidities.,"SELECT DISTINCT
+  CASE 
+    WHEN concept_name_1>concept_name_2 THEN concept_name_1 
+    ELSE concept_name_2 
+  END AS condition1,
+  CASE 
+    WHEN concept_name_1>concept_name_2 THEN concept_name_2 
+    ELSE concept_name_1 
+  END AS condition2
+FROM 
+  (SELECT
+    concept_name_1  AS concept_name_1,
+    concept_name    AS concept_name_2
+   FROM 
+    (SELECT
+      condition_concept_id_2,
+      concept_name AS concept_name_1
+     FROM 
+      (SELECT
+        table1.condition_concept_id AS condition_concept_id_1,
+        table2.condition_concept_id AS condition_concept_id_2
+       FROM
+          (SELECT * FROM cdm.condition_era 
+           WHERE person_id = 136931019 -- Input person_id
+           ) AS table1,
+          (SELECT * FROM cdm.condition_era 
+           WHERE person_id = 136931019 -- Input person_id
+          ) AS table2
+      WHERE table2.condition_era_start_date <= table1.condition_era_end_date 
+            AND (table2.condition_era_end_date IS NULL OR table2.condition_era_end_date >= table1.condition_era_start_date) 
+            AND table1.condition_concept_id<>table2.condition_concept_id
+      ) AS comorb
+    LEFT JOIN cdm.concept AS concept_list 
+    ON comorb.condition_concept_id_1=concept_list.concept_id
+    ) AS comorb2
+  LEFT JOIN cdm.concept AS concept_list 
+  ON comorb2.condition_concept_id_2=concept_list.concept_id
+  ) AS condition_pairs;"
+CO07 Frequency of hospitalized for a condition,"SELECT
+  number_of_hospitalizations,
+  count(*)          AS persons_freq
+FROM 
+  (SELECT
+    person_id,
+    COUNT(*)        AS number_of_hospitalizations
+   FROM 
+    (SELECT 
+      DISTINCT
+        condition_era_id,
+        era.person_id
+     FROM 
+      (SELECT
+        condition_start_date,
+        condition_end_date,
+        from_cond.person_id
+       FROM 
+        (SELECT
+          visit_occurrence_id,
+          condition_start_date,
+          condition_end_date,
+          person_id
+         FROM cdm.condition_occurrence
+         WHERE condition_concept_id=31967 -- Input condition_concept_id 
+               AND visit_occurrence_id IS NOT NULL
+        ) AS FROM_cond
+       INNER JOIN cdm.visit_occurrence FROM_visit
+        ON FROM_cond.visit_occurrence_id=FROM_visit.visit_occurrence_id
+       INNER JOIN cdm.care_site cs 
+        ON from_visit.care_site_id=cs.care_site_id
+       WHERE  place_of_service_concept_id=8717 -- Inpatient hospital
+    ) AS occurr,
+    (SELECT
+        condition_era_id,
+        person_id,
+        condition_era_start_date,
+        condition_era_end_date
+     FROM cdm.condition_era
+     WHERE condition_concept_id=31967 -- Input condition_concept_id 
+    ) AS era
+   WHERE era.person_id=occurr.person_id 
+         AND era.condition_era_start_date <= occurr.condition_end_date 
+         AND (era.condition_era_end_date IS NULL OR era.condition_era_end_date >= occurr.condition_start_date)
+   ) AS c
+  GROUP BY person_id
+  ) AS hospitalizations_freq
+GROUP BY number_of_hospitalizations
+ORDER BY persons_freq DESC;"
+CO08 Duration of hospitalization for a conditions,"SELECT
+  avg(hosp_no_days) AS average_hosp_duration_count
+FROM
+  (SELECT DISTINCT
+    hosp_no_days,
+    person_id,
+    from_visit.visit_occurrence_id
+   FROM
+    (SELECT
+      visit_occurrence_id,
+      condition_start_date,
+      condition_end_date,
+      person_id
+     FROM cdm.condition_occurrence
+     WHERE condition_concept_id = 31967 -- Input condition_concept_id
+           AND visit_occurrence_id IS NOT NULL
+    ) AS from_cond
+INNER JOIN
+  (SELECT
+    DATEDIFF(DAY, visit_start_date, visit_end_date) + 1 AS hosp_no_days,
+    visit_start_date,
+    visit_occurrence_id,
+    place_of_service_concept_id
+   FROM cdm.visit_occurrence v
+   INNER JOIN cdm.care_site c
+   ON v.care_site_id=c.care_site_id
+   WHERE place_of_service_concept_id = 8717 -- Inpatient hospital
+  ) AS from_visit
+ON from_cond.visit_occurrence_id = from_visit.visit_occurrence_id
+ ) AS hosp_duration_count
+;"
+"CO09 Is a condition seasonal, alergies for example","SELECT season, 
+       COUNT(*) AS season_freq
+FROM 
+  (SELECT 
+    CASE
+      WHEN daymonth>0320 AND daymonth<=0621 THEN 'Spring' 
+      WHEN daymonth>0621 AND daymonth<=0922 THEN 'Summer' 
+      WHEN daymonth>0922 AND daymonth<=1221 THEN 'Fall' 
+      WHEN daymonth>1221 OR (daymonth>0000 AND daymonth<=0520) THEN 'Winter'
+      ELSE 'Unknown'
+    END                   AS season
+    FROM 
+       (SELECT 
+        
+          CAST(CONCAT(CAST(DAY(condition_start_date) AS VARCHAR), CAST(MONTH(condition_start_date) AS VARCHAR)) AS int) AS daymonth,
+          condition_start_date
+        FROM cdm.condition_occurrence
+        WHERE condition_concept_id = 31967 -- Input condition_concept_id
+       ) AS condition_dates
+  ) AS condition_season
+GROUP BY season
+ORDER BY season_freq;"
+CO10 Counts of condition records,"SELECT
+  COUNT(*) AS condition_occurrence_count
+FROM cdm.condition_occurrence
+WHERE condition_concept_id = 31967;"
+CO11 Counts of persons with conditions,"SELECT
+  COUNT(DISTINCT person_id) AS persons_with_condition_count
+FROM cdm.condition_occurrence
+WHERE condition_concept_id = 31967
+      AND person_id IS NOT NULL;"
+CO12 Distribution of condition end dates.,"WITH end_rank AS 
+  (SELECT
+    condition_end_date,
+    SUM(1) over (partition BY 1 ORDER BY condition_end_date ASC ROWS BETWEEN unbounded preceding AND CURRENT row) AS rownumASc
+  FROM cdm.condition_occurrence
+  ),
+    other_stat AS 
+  (SELECT
+    COUNT(condition_end_date)                                                                                   AS condition_end_date_count,
+    MIN(condition_end_date)                                                                                     AS condition_end_date_min,
+    MAX(condition_end_date)                                                                                     AS condition_end_date_max,
+    DATEADD(day, AVG(CAST(DATEDIFF(DAY,CONVERT(date,'00010101'), condition_end_date) AS BIGINT)), CONVERT(date,'00010101')) AS condition_end_date_average,
+    STDEV(DATEDIFF(d,CONVERT(date,'00010101'), condition_end_date))                                           AS condition_end_date_stddev
+   FROM cdm.condition_occurrence
+   WHERE condition_end_date IS NOT NULL
+  )
+SELECT
+  (SELECT 
+    COUNT(condition_end_date) 
+   FROM cdm.condition_occurrence 
+   WHERE condition_end_date IS NULL
+  ) AS condition_end_date_null_count,
+  condition_end_date_count,condition_end_date_min,condition_end_date_max,condition_end_date_average,condition_end_date_stddev,
+  condition_end_date_25pctile,condition_end_date_median,condition_end_date_75pctile
+
+FROM other_stat,
+    (SELECT DATEADD(day,AVG(CAST(DATEDIFF(DAY, CONVERT(date, '00010101'), condition_end_date) AS BIGINT)),CONVERT(date, '00010101'))  AS condition_end_date_25pctile
+      FROM (
+       SELECT condition_end_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+           ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.25 AS int)   AND floor(rowno*25/100)  = rowno*25/100 ) 
+          OR ( rownumASc = CAST(rowno*0.25 AS int)   AND floor(rowno*25/100) != rowno*25/100 )
+          OR ( rownumASc = CAST(rowno*0.25 AS int)+1 AND floor(rowno*25/100) != rowno*25/100 )
+     ) condition_end_date_25pctile,
+    (SELECT DATEADD(day,AVG(CAST(DATEDIFF(DAY, CONVERT(date, '00010101'), condition_end_date) AS BIGINT)),CONVERT(date, '00010101'))  AS condition_end_date_median
+      FROM (
+       SELECT condition_end_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+          ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.5 AS int)   AND floor(rowno*50/100)  = rowno*50/100 ) 
+          OR ( rownumASc = CAST(rowno*0.5 AS int)   AND floor(rowno*50/100) != rowno*50/100 )
+          OR ( rownumASc = CAST(rowno*0.5 AS int)+1 AND floor(rowno*50/100) != rowno*50/100 )
+     ) condition_end_date_median,
+    (SELECT DATEADD(day,AVG(CAST(DATEDIFF(DAY, CONVERT(date, '00010101'), condition_end_date) AS BIGINT)),CONVERT(date, '00010101'))AS condition_end_date_75pctile
+      FROM (
+       SELECT condition_end_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+         ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.75 AS int)   AND floor(rowno*75/100)  = rowno*75/100 ) 
+          OR ( rownumASc = CAST(rowno*0.75 AS int)   AND floor(rowno*75/100) != rowno*75/100 )
+          OR ( rownumASc = CAST(rowno*0.75 AS int)+1 AND floor(rowno*75/100) != rowno*75/100 )
+     ) condition_end_date_75pctile
+;"
+CO13 Distribution of condition start dates,"WITH end_rank AS 
+  (SELECT
+    condition_start_date,
+    SUM(1) over (partition BY 1 ORDER BY condition_start_date ASC ROWS BETWEEN unbounded preceding AND CURRENT row) AS rownumASc
+  FROM cdm.condition_occurrence
+  ),
+  other_stat AS 
+  (SELECT
+    COUNT(condition_start_date)                                                      AS co_start_date_count,
+    MIN(condition_start_date)                                                        AS co_start_date_min,
+    MAX(condition_start_date)                                                        AS co_start_date_max,
+    DATEADD(DAY, AVG(CAST(DATEDIFF(DAY,DATEFROMPARTS(1,1,1),condition_start_date) AS BIGINT)), DATEFROMPARTS(1,1,1)) AS co_start_date_average,
+    STDEV((DATEDIFF(DAY,DATEFROMPARTS(1,1,1),condition_start_date)))                                       AS co_start_date_stddev
+   FROM cdm.condition_occurrence
+   WHERE condition_start_date IS NOT NULL
+  )
+
+SELECT
+  (SELECT 
+    COUNT(condition_start_date) 
+   FROM cdm.condition_occurrence 
+   WHERE condition_start_date IS NULL
+  ) AS co_start_date_null_count
+, co_start_date_count
+, co_start_date_min
+, co_start_date_max
+, co_start_date_average
+, co_start_date_stddev
+, co_start_date_25percentile
+, co_start_date_median
+, co_start_date_75percentile
+FROM other_stat,
+    (SELECT
+      DATEADD(DAY, AVG(CAST(DATEDIFF(DAY,DATEFROMPARTS(1,1,1),condition_start_date) AS BIGINT)), DATEFROMPARTS(1,1,1)) AS co_start_date_25percentile
+      FROM (
+       SELECT condition_start_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+           ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.25 AS int)   AND floor(rowno*25/100)  = rowno*25/100 ) 
+          OR ( rownumASc = CAST(rowno*0.25 AS int)   AND floor(rowno*25/100) != rowno*25/100 )
+          OR ( rownumASc = CAST(rowno*0.25 AS int)+1 AND floor(rowno*25/100) != rowno*25/100 )
+     ) co_start_date_25percentile,
+    (SELECT
+      DATEADD(DAY, AVG(CAST(DATEDIFF(DAY,DATEFROMPARTS(1,1,1),condition_start_date) AS BIGINT)), DATEFROMPARTS(1,1,1)) AS co_start_date_median
+      FROM (
+       SELECT condition_start_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+          ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.5 AS int)   AND floor(rowno*50/100)  = rowno*50/100 ) 
+          OR ( rownumASc = CAST(rowno*0.5 AS int)   AND floor(rowno*50/100) != rowno*50/100 )
+          OR ( rownumASc = CAST(rowno*0.5 AS int)+1 AND floor(rowno*50/100) != rowno*50/100 )
+     ) co_start_date_median,
+    (SELECT
+      DATEADD(DAY, AVG(CAST(DATEDIFF(DAY, DATEFROMPARTS(1,1,1),condition_start_date) AS BIGINT)), DATEFROMPARTS(1,1,1)) AS co_start_date_75percentile
+          FROM (
+       SELECT condition_start_date, rownumAsc,(SELECT COUNT(*) FROM end_rank ) AS rowno 
+         FROM end_rank 
+         ) a_1
+       WHERE ( rownumASc = CAST(rowno*0.75 AS int)   AND floor(rowno*75/100)  = rowno*75/100 ) 
+          OR ( rownumASc = CAST(rowno*0.75 AS int)   AND floor(rowno*75/100) != rowno*75/100 )
+          OR ( rownumASc = CAST(rowno*0.75 AS int)+1 AND floor(rowno*75/100) != rowno*75/100 )
+     ) co_start_date_75percentile
+
+;"
+CO14 Counts of condition types,"SELECT condition_type_freq, condition_type_concept_id, concept_name
+FROM (
+    SELECT condition_type_concept_id, 
+           count(*) AS condition_type_freq
+    FROM cdm.condition_occurrence
+    WHERE condition_concept_id = 372409
+    GROUP BY condition_type_concept_id
+    ) AS condition_type_count
+LEFT JOIN (
+    SELECT concept_id, 
+           concept_name
+    FROM cdm.concept
+    ) AS type_concept 
+    ON condition_type_count.condition_type_concept_id=type_concept.concept_id
+ORDER BY condition_type_freq;"
+CO15 Distribution of number of distinct conditions persons have,"WITH ranked AS 
+  (SELECT
+    num_of_conditions,
+    row_number() over (ORDER BY num_of_conditions ASC) AS rownumasc
+  FROM 
+    (SELECT
+      person_id,
+      COUNT(DISTINCT condition_concept_id) AS num_of_conditions
+     FROM cdm.condition_occurrence
+     WHERE person_id!=0
+     GROUP BY person_id
+    ) AS counts_conditions_person_1
+  ),
+  other_stat AS 
+  (SELECT
+    COUNT(num_of_conditions)           AS condition_dist_num_count,
+    MIN(num_of_conditions)             AS condition_dist_num_min,
+    MAX(num_of_conditions)             AS condition_dist_num_max,
+    ROUND(AVG(num_of_conditions), 2)   AS condition_dist_num_average,
+    ROUND(STDEV(num_of_conditions), 2) AS condition_dist_num_stddev
+   FROM 
+    (SELECT
+      person_id,
+      COUNT(DISTINCT condition_concept_id) AS num_of_conditions
+     FROM cdm.condition_occurrence
+     WHERE person_id!=0
+     GROUP BY person_id
+    ) AS counts_conditions_person_2
+  )
+  
+SELECT DISTINCT
+  (SELECT 
+    COUNT(DISTINCT person_id) 
+   FROM cdm.condition_occurrence 
+   WHERE condition_occurrence_id IS NULL
+  ) AS condition_null_count,
+  condition_dist_num_count,condition_dist_num_min,condition_dist_num_max,condition_dist_num_average,condition_dist_num_stddev
+FROM
+  other_stat,
+  (SELECT 
+    DISTINCT num_of_conditions AS condition_dist_num_25pctile
+    FROM
+      (SELECT num_of_conditions, rownumasc,(SELECT COUNT(*) FROM ranked) AS rowno FROM ranked) AS a_1
+    WHERE    (rownumasc = CAST(rowno*0.25 AS INT)   AND floor(rowno*25/100)  = rowno*25/100 )
+          OR (rownumasc = CAST(rowno*0.25 AS INT)   AND floor(rowno*25/100) != rowno*25/100 )
+          OR (rownumasc = CAST(rowno*0.25 AS INT)+1 AND floor(rowno*25/100) != rowno*25/100 )
+  ) condition_end_date_25pctile,
+  (SELECT
+    DISTINCT num_of_conditions AS condition_dist_num_median
+   FROM
+      (SELECT num_of_conditions, rownumasc,(SELECT COUNT(*) FROM ranked) AS rowno FROM ranked) AS a_2
+   WHERE    (rownumasc = CAST(rowno*0.50 AS INT)   AND floor(rowno*50/100)  = rowno*50/100 )
+         OR (rownumasc = CAST(rowno*0.50 AS INT)   AND floor(rowno*50/100) != rowno*50/100 )
+         OR (rownumasc = CAST(rowno*0.50 AS INT)+1 AND floor(rowno*50/100) != rowno*50/100 )
+  ) condition_end_date_median,
+  (SELECT
+    DISTINCT num_of_conditions AS condition_dist_num_75pctile
+   FROM
+      (SELECT num_of_conditions, rownumasc,(SELECT COUNT(*) FROM ranked) AS rowno FROM ranked) AS A_3
+   WHERE    (rownumasc= CAST(rowno*0.75 AS INT)   AND floor(rowno*75/100)  = rowno*75/100 ) 
+         OR (rownumasc= CAST(rowno*0.75 AS INT)   AND floor(rowno*75/100) != rowno*75/100 )
+         OR (rownumasc= CAST(rowno*0.75 AS INT)+1 AND floor(rowno*75/100) != rowno*75/100 )
+  ) condition_end_date_75pctile;"
+CO16 Counts of number of distinct conditions persons have,"SELECT 
+  COUNT(c.condition_concept_id) conditions_count, 
+  c.person_id
+FROM cdm.condition_occurrence c
+WHERE condition_concept_id = 201820 -- Input condition_concept_id
+GROUP BY c.person_id
+ORDER BY 1 DESC;"
+CO17 Distribution of condition occurrence records per person,"WITH person_conditions AS
+         (SELECT person_id,
+                 COUNT(*) AS num_of_conditions
+          FROM cdm.condition_occurrence
+          GROUP BY person_id
+         ),
+     ranked AS
+         (SELECT num_of_conditions,
+                 sum(1) OVER (PARTITION BY 1
+                     ORDER BY num_of_conditions
+                         ASC ROWS BETWEEN UNBOUNDED PRECEDING
+                         AND CURRENT ROW
+                     ) AS rownumasc
+          FROM person_conditions
+         ),
+     other_stat AS
+         (SELECT COUNT(num_of_conditions)           AS condition_num_count,
+                 MIN(num_of_conditions)             AS condition_num_min,
+                 MAX(num_of_conditions)             AS condition_num_max,
+                 ROUND(AVG(num_of_conditions), 2)   AS condition_num_average,
+                 ROUND(STDEV(num_of_conditions), 2) AS condition_num_stddev
+          FROM person_conditions
+         )
+SELECT DISTINCT condition_num_count,
+                condition_num_average,
+                condition_num_stddev,
+                condition_num_min,
+                condition_num_25percentile,
+                condition_num_median,
+                condition_num_75percentile,
+                condition_num_max
+FROM other_stat,
+     (SELECT num_of_conditions AS condition_num_25percentile
+      FROM (SELECT num_of_conditions, rownumasc, (SELECT count(*) FROM ranked) AS rowno FROM ranked) AS all_1
+      WHERE (rownumasc = CAST(rowno * 0.25 AS INT) AND floor(rowno * 25 / 100) = rowno * 25 / 100)
+         OR (rownumasc = CAST(rowno * 0.25 AS INT) AND floor(rowno * 25 / 100) != rowno * 25 / 100)
+         OR (rownumasc = CAST(rowno * 0.25 AS INT) + 1 AND floor(rowno * 25 / 100) != rowno * 25 / 100)
+     ) condition_num_25percentile,
+     (SELECT num_of_conditions AS condition_num_median
+      FROM (SELECT num_of_conditions, rownumasc, (SELECT count(*) FROM ranked) AS rowno FROM ranked) AS all_2
+      WHERE (rownumasc = CAST(rowno * 0.50 AS INT) AND floor(rowno * 50 / 100) = rowno * 50 / 100)
+         OR (rownumasc = CAST(rowno * 0.50 AS INT) AND floor(rowno * 50 / 100) != rowno * 50 / 100)
+         OR (rownumasc = CAST(rowno * 0.50 AS INT) + 1 AND floor(rowno * 50 / 100) != rowno * 50 / 100)
+     ) condition_num_median,
+     (SELECT num_of_conditions AS condition_num_75percentile
+      FROM (SELECT num_of_conditions, rownumasc, (SELECT count(*) FROM ranked) AS rowno FROM ranked) AS all_3
+      WHERE (rownumasc = cast(rowno * 0.75 AS INT) AND floor(rowno * 75 / 100) = rowno * 75 / 100)
+         OR (rownumasc = cast(rowno * 0.75 AS INT) AND floor(rowno * 75 / 100) != rowno * 75 / 100)
+         OR (rownumasc = cast(rowno * 0.75 AS INT) + 1 AND floor(rowno * 75 / 100) != rowno * 75 / 100)
+     ) condition_num_75percentile;"
+CO18 Counts of condition occurrence records,"SELECT
+  COUNT(*) AS number_condition_occurrences
+FROM cdm.condition_occurrence
+WHERE condition_concept_id = 31967;"
+CO19 Counts of condition occurrence records stratified by observation month,"SELECT 
+  MONTH(condition_start_date) month_number, 
+  COUNT(*) AS number_of_conditions_in_month
+FROM cdm.condition_occurrence
+GROUP BY MONTH(condition_start_date)
+ORDER BY 1;"
+CO20 Counts of stop reasons,"SELECT 
+  COUNT(stop_reason) AS stop_reason_count,
+  stop_reason
+FROM cdm.condition_occurrence 
+GROUP BY stop_reason;"
+"CO21 Distribution of age, stratified by condition","WITH selected_conditions AS
+  ( SELECT *
+    FROM cdm.condition_occurrence
+    WHERE condition_concept_id
+       IN -- all input SNOMED codes for diabetes
+                    (192691, 193323, 194700, 195771, 200687, 201254,
+                     201530, 201531, 201820, 201826 , 318712, 373999,
+                     377821, 4008576, 4009780, 4024659, 4030061,
+                     4034960, 4034962, 4047906 , 40480000, 4048202,
+                     40482883, 40488810, 4058243, 4062685, 4062686,
+                     4062687, 4063042, 4063043 , 4079850, 4096041,
+                     4096042, 4096668, 4096670, 4096671, 4099214,
+                     4099215, 4099217, 4099334 , 4099651, 4099652,
+                     4099653, 4099741, 4102018, 4129378, 4129516,
+                     4129519, 4130162, 4130164 , 4130166, 4136889,
+                     4137214, 4140808, 4143529, 4143689, 4143857,
+                     4144583, 4145827, 4151281 , 4151282, 4152858,
+                     4155634, 4166381, 4178452, 4178790, 4192852,
+                     4193704, 4196141, 4198296 , 4200873, 4200875,
+                     4202383, 4212631, 4221344, 4222222, 4222410,
+                     4222547, 4222553, 4222687 , 4222834, 4223303,
+                     4223444, 4224254, 4224709, 4224723, 4225013,
+                     4225055, 4225656, 4226245 , 4227210, 4228102,
+                     4228112, 4230254, 4231917, 4235410, 4237068,
+                     4240589, 4245270, 4252384, 4263902, 4295011,
+                     4304377, 4312138, 4321756, 4322638, 4325113,
+                     4326434, 4327944, 435216 , 439770, 443012,
+                     443412, 443592)
+  )
+
+SELECT
+  concept_name                                                           AS condition,
+  ordered_data.condition_concept_id                                      AS condition_concept_id,
+  count(*)                                                               AS condition_occurrences,
+  min(age)                                                               AS min_age,
+  round(avg(age), 2)                                                     AS avg_age,
+  max(age)                                                               AS max_age,
+  round(STDEV(age), 1)                                                   AS STDEV_age,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE age END) AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE age END) AS percentile_75,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE age END) AS percentile_25
+
+FROM
+ ( SELECT
+    condition_concept_id,
+    YEAR(condition_start_date) - year_of_birth                                                                  AS age,
+    ROW_NUMBER() OVER (PARTITION BY condition_concept_id ORDER BY (YEAR(condition_start_date) - year_of_birth)) AS order_nr
+   FROM selected_conditions
+   INNER JOIN cdm.person
+     ON selected_conditions.person_id = person.person_id
+ ) AS ordered_data
+INNER JOIN
+ ( SELECT
+    condition_concept_id,
+    COUNT(*) AS population_size
+  FROM selected_conditions
+  GROUP BY condition_concept_id
+ ) AS population_sizes
+ON ordered_data.condition_concept_id = population_sizes.condition_concept_id
+  JOIN cdm.concept ON concept_id = population_sizes.condition_concept_id
+GROUP BY concept_name, ordered_data.condition_concept_id
+ORDER BY ordered_data.condition_concept_id DESC;"
+"CO22 Counts of conditions, stratified by condition type","SELECT 
+  concept_name                      AS condition_occurrence_type, 
+  condition_type_concept_id, 
+  COUNT(*)                          AS occurrence_type_count
+FROM cdm.condition_occurrence
+INNER JOIN cdm.concept 
+ON concept_id = condition_type_concept_id
+GROUP BY concept_name, condition_type_concept_id;"
+"CO23 Distribution of condition occurrence month/year, stratified by condition.","SELECT condition_concept_id,
+       concept_name,
+       condition_month_year,
+       count(*)                   AS occurrences_count
+  FROM
+      (SELECT condition_concept_id,
+              concept_name,
+              
+              CONCAT(MONTH(condition_start_date), '-', YEAR(condition_start_date))  AS condition_month_year,
+              MONTH(condition_start_date)                                           AS m1
+        FROM cdm.condition_occurrence condition
+        INNER JOIN cdm.concept concept
+        ON condition.condition_concept_id = concept.concept_id AND condition.condition_concept_id=192279
+      ) AS m1
+GROUP BY condition_concept_id,
+         concept_name,
+         condition_month_year,
+         m1
+ORDER BY m1;"
+"CO24 Counts of genders, stratified by condition","SELECT
+      CASE
+        WHEN male_id<> null THEN male_id
+        ELSE female_id
+      END                                  AS concept_id,
+
+      CASE
+        WHEN male_concept_name<> null THEN male_concept_name
+        ELSE female_concept_name
+      END                                  AS name,
+        count_male,
+        count_female
+  FROM
+    (SELECT male_list.condition_concept_id        AS male_id,
+            male_list.concept_name                AS male_concept_name,
+            male_list.count_male                  AS count_male ,
+            female_list.condition_concept_id      AS female_id,
+            female_list.concept_name              AS female_concept_name,
+            female_list.count_female              AS count_female
+      FROM
+        (SELECT condition_concept_id,
+                concept_name,
+                count(*)                          AS count_male
+          FROM cdm.condition_occurrence condition
+          INNER JOIN cdm.concept concept
+          ON condition.condition_concept_id=concept.concept_id
+             AND person_id IN (SELECT person_id
+                               FROM cdm.person
+                               WHERE gender_concept_id=8507 --Male
+                               )
+          GROUP BY  condition_concept_id, concept_name
+        ) AS male_list
+
+        FULL JOIN
+
+        (SELECT condition_concept_id,
+                concept_name,
+                count(*)                          AS count_female
+          FROM cdm.condition_occurrence condition
+          INNER JOIN cdm.concept concept
+          ON condition.condition_concept_id=concept.concept_id
+             AND person_id IN (SELECT person_id
+                               FROM cdm.person
+                               WHERE gender_concept_id=8532 --Female
+                               )
+          GROUP BY condition_concept_id, concept_name
+        ) AS female_list
+
+        ON male_list.condition_concept_id=female_list.condition_concept_id
+    ) AS counts_disease_gender"
+"CO25 Counts of condition records per person, stratified by condition.","SELECT condition_concept_id, 
+       num_of_occurrences,
+       count(*) num_of_patients
+FROM 
+  (SELECT condition_concept_id, 
+          person_id, 
+          count(*) num_of_occurrences
+    FROM cdm.condition_occurrence condition
+    WHERE condition.condition_concept_id = 200219 -- Input condition
+    GROUP BY person_id, condition_concept_id
+  ) AS counts_condition_person
+GROUP BY condition_concept_id, num_of_occurrences;"
+COC01 Determines first line of therapy for a condition,"SELECT
+  ingredient_name,
+  ingredient_concept_id,
+  count(*) AS num_patients
+FROM /*Drugs started by people up to 30 days after Angioedema diagnosis */ (
+  SELECT
+    condition.person_id,
+    condition_start_date,
+    drug_era_start_date,
+    ingredient_name,
+    ingredient_concept_id
+  FROM /* people with Angioedema with 180 clean period and 180 day follow-up */ (
+    SELECT
+      era.person_id,
+      condition_era_start_date AS condition_start_date
+    FROM cdm.condition_era era
+    JOIN cdm.observation_period obs
+      ON obs.person_id = era.person_id AND
+         era.condition_era_start_date >= DATEADD(DAY,180,obs.observation_period_start_date) AND
+         era.condition_era_start_date <= DATEADD(DAY, -180,obs.observation_period_end_date)
+    WHERE
+      era.condition_concept_id IN -- SNOMed codes for Angioedema  
+      ( SELECT descendant_concept_id
+        FROM cdm.concept_ancestor
+        WHERE ancestor_concept_id=432791)
+  ) condition
+  JOIN cdm.drug_era rx /* Drug_era has drugs at ingredient level */
+    ON rx.person_id = condition.person_id AND
+       rx.drug_era_start_date >= condition.condition_start_date AND
+       rx.drug_era_start_date <= DATEADD(day,30,condition.condition_start_date)
+  JOIN /* Ingredients for indication Angioedema */ (
+    SELECT
+      ingredient.concept_id AS ingredient_concept_id ,
+      ingredient.concept_name AS ingredient_name
+    FROM cdm.concept ingredient
+    JOIN cdm.concept_ancestor ca ON ca.descendant_concept_id = ingredient.concept_id
+    WHERE
+      ca.ancestor_concept_id = 21003378 /* indication for angioedema */ AND
+      ingredient.concept_class_id ='Ingredient'
+  ) ingredients ON ingredients.ingredient_concept_id = rx.drug_concept_id
+) therapy
+GROUP by ingredient_name, ingredient_concept_id
+ORDER BY num_patients DESC;"
+COC02 Determines length of course of therapy for a condition,"SELECT ingredient_name,
+    ingredient_concept_id,
+    count(*) AS num_patients,
+    min(length_of_therapy) AS min_length_of_therapy,
+    max(length_of_therapy) AS max_length_of_therapy,
+    avg(length_of_therapy) AS average_length_of_therapy
+FROM (
+    SELECT condition.person_id,
+        condition.condition_start_date,
+        rx.drug_era_start_date,
+        DATEDIFF(day, rx.drug_era_start_date, rx.drug_era_end_date) + 1 AS length_of_therapy,
+        ingredient_name,
+        ingredient_concept_id
+    FROM (
+        SELECT era.person_id,
+            condition_era_start_date AS condition_start_date
+        FROM cdm.condition_era era
+        INNER JOIN cdm.observation_period AS obs ON obs.person_id = era.person_id
+            AND condition_era_start_date >= DATEADD(day,180,observation_period_start_date)
+                AND condition_era_start_date <= DATEADD(day,-180,observation_period_end_date)
+        WHERE condition_concept_id IN (137829, 138723, 140065, 140681, 4031699, 4098027, 4098028, 4098145, 4098760, 4100998, 4101582, 4101583, 4120453, 4125496, 4125497, 4125498, 4125499, 4146086, 4146087, 4146088, 4148471, 4177177, 4184200, 4184758, 4186108, 4187773, 4188208, 4211348, 4211695, 4225810, 4228194, 4234973, 4298690, 4345236)
+        ) condition
+    INNER JOIN cdm.drug_era rx ON rx.person_id = condition.person_id
+        AND rx.drug_era_start_date >= condition_start_date
+            AND rx.drug_era_start_date <= DATEADD(day, 30,condition_start_date)
+    INNER JOIN (
+        SELECT DISTINCT ingredient.concept_id AS ingredient_concept_id,
+            ingredient.concept_name AS ingredient_name
+        FROM cdm.concept_ancestor ancestor
+        INNER JOIN cdm.concept indication ON ancestor.ancestor_concept_id = indication.concept_id
+        INNER JOIN cdm.concept ingredient ON ingredient.concept_id = ancestor.descendant_concept_id
+        WHERE lower(indication.concept_name) LIKE ('%anemia%')
+            AND indication.vocabulary_id = 'Indication'
+            AND ingredient.concept_class_id = 'Ingredient'
+            AND indication.invalid_reason IS NULL /* not necessary as concept_ancestor stores only valid concepts */
+            AND ingredient.invalid_reason IS NULL /* not necessary as concept_ancestor stores only valid concepts */
+                    ) ingredients ON ingredient_concept_id = drug_concept_id
+    ) treatment
+GROUP BY ingredient_name,
+    ingredient_concept_id
+ORDER BY num_patients DESC;"
+COC05 Mortality rate after initial diagnosis,"SELECT COUNT(DISTINCT diagnosed.person_id) AS all_infarctions,
+    SUM(CASE
+            WHEN death.person_id IS NULL
+                THEN 0
+            ELSE 1
+            END) AS death_from_infarction
+FROM -- Initial diagnosis of Acute Myocardial Infarction
+    (
+    SELECT DISTINCT person_id,
+        condition_era_start_date
+    FROM /* diagnosis of Acute Myocardial Infarction, ranked by date, 6 month clean period with 1 year follow-up */
+        (
+        SELECT condition.person_id,
+            condition.condition_era_start_date,
+            SUM(1) OVER (
+                PARTITION BY condition.person_id ORDER BY condition_era_start_date ROWS UNBOUNDED PRECEDING
+                ) AS ranking
+        FROM cdm.condition_era condition
+        INNER JOIN --definition of Acute Myocardial Infarction 1
+            (
+            SELECT DISTINCT ca.descendant_concept_id AS concept_id
+            FROM cdm.concept concept1
+            INNER JOIN cdm.concept_relationship rel ON concept1.concept_id = rel.concept_id_1
+            INNER JOIN cdm.concept_ancestor ca ON ancestor_concept_id = concept_id_2
+            WHERE rel.relationship_id = 'HOI - SNOMED'
+                AND concept1.concept_name = 'OMOP Acute Myocardial Infarction 1'
+                AND rel.invalid_reason IS NULL
+            ) conceptlist ON conceptlist.concept_id = condition_concept_id
+        INNER JOIN cdm.observation_period obs ON obs.person_id = condition.person_id
+            AND condition_era_start_date >= DATEADD(day, 180, observation_period_start_date)
+            AND condition_era_start_date <= DATEADD(day, - 360, observation_period_end_date)
+        ) ranked_diagnosis
+    WHERE ranking = 1
+    ) diagnosed
+LEFT JOIN cdm.death /* death within a year */
+    ON death.person_id = diagnosed.person_id
+    AND death.death_date <= DATEADD(day, 360, condition_era_start_date);"
+COC06 Time until death after initial diagnosis,"SELECT COUNT(DISTINCT diagnosed.person_id) AS all_infarction_deaths,
+    ROUND(min(DATEDIFF(day, diagnosed.condition_era_start_date, death.death_date)) / 365, 1) AS min_years,
+    ROUND(max(DATEDIFF(day, diagnosed.condition_era_start_date, death.death_date)) / 365, 1) AS max_years,
+    ROUND(avg(DATEDIFF(day, diagnosed.condition_era_start_date, death.death_date)) / 365, 1) AS avg_years
+FROM -- Initial diagnosis of Acute Myocardial Infarction
+    (
+    SELECT DISTINCT person_id,
+        condition_era_start_date
+    FROM /* diagnosis of Acute Myocardial Infarction, ranked by date, 6 month clean*/
+        (
+        SELECT condition.person_id,
+            condition.condition_era_start_date,
+            rank() OVER (PARTITION BY condition.person_id ORDER BY condition_era_start_date) AS ranking
+        FROM cdm.condition_era condition
+        INNER JOIN -- definition of Acute Myocardial Infarction 1
+            (
+            SELECT DISTINCT ca.descendant_concept_id AS concept_id
+            FROM cdm.concept concept1
+            INNER JOIN cdm.concept_relationship rel ON concept1.concept_id = rel.concept_id_1
+            INNER JOIN cdm.concept_ancestor ca ON ancestor_concept_id = concept_id_2
+            WHERE rel.relationship_id = 'HOI - SNOMED'
+                AND concept1.concept_name = 'OMOP Acute Myocardial Infarction 1'
+                AND rel.invalid_reason IS NULL
+            ) conceptlist ON conceptlist.concept_id = condition_concept_id
+        INNER JOIN cdm.observation_period obs ON obs.person_id = condition.person_id
+            AND condition.condition_era_start_date >= DATEADD(day, 180, obs.observation_period_start_date)
+        ) diagnosis_ranked
+    WHERE ranking = 1
+    ) diagnosed
+INNER JOIN cdm.death ON death.person_id = diagnosed.person_id;"
+COC07 Patients with condition in conjunction with a procedure some number of days prior to or after initial condition.,"SELECT DISTINCT condition.condition_concept_id,
+    condition.person_id,
+    procedure_date,
+    condition_era_start_date
+FROM cdm.procedure_occurrence pr
+INNER JOIN cdm.condition_era condition ON condition.person_id = pr.person_id
+INNER JOIN (
+    SELECT DISTINCT ca.descendant_concept_id AS concept_id
+    FROM cdm.concept concept1
+    INNER JOIN cdm.concept_relationship rel ON concept1.concept_id = rel.concept_id_1
+    INNER JOIN cdm.concept_ancestor ca ON ancestor_concept_id = concept_id_2
+    WHERE rel.relationship_id = 'HOI - SNOMED'
+        AND concept1.concept_name = 'OMOP Aplastic Anemia 1'
+        AND rel.invalid_reason IS NULL
+    ) conceptlist ON conceptlist.concept_id = condition_concept_id
+WHERE pr.procedure_concept_id IN ( 2002382, 2002403, 2108452, 2108453, 2212660, 2212662, 3045142, 3048879, 36359239, 37586183)
+    AND procedure_date >= DATEADD(day, - 60, condition_era_start_date)
+    AND procedure_date <= condition_era_start_date;"
+COC08 Patients with condition and some measurement criteria some number of days prior to or after initial condition,"SELECT DISTINCT condition.person_id,
+    measurement_date,
+    condition_era_start_date
+FROM cdm.condition_era condition
+INNER JOIN --  definition of Aplastic Anemia
+    (
+    SELECT DISTINCT ca.descendant_concept_id AS concept_id
+    FROM cdm.concept concept1
+    INNER JOIN cdm.concept_relationship rel ON concept1.concept_id = rel.concept_id_1
+    INNER JOIN cdm.concept_ancestor ca ON ancestor_concept_id = concept_id_2
+    WHERE rel.relationship_id = 'HOI - SNOMED'
+        AND concept1.concept_name = 'OMOP Aplastic Anemia 1'
+        AND rel.invalid_reason IS NULL
+    ) conceptlist ON conceptlist.concept_id = condition_concept_id
+INNER JOIN cdm.measurement measurement ON measurement.person_id = condition.person_id
+    AND measurement_date >= DATEADD(day, - 7, condition_era_start_date)
+    AND measurement_date <= DATEADD(day, 7, condition_era_start_date)
+WHERE measurement_concept_id IN /* leukocytes #/volume in blood */ (3000905, 3003282, 3010813)
+    AND unit_concept_id = 8961 /* Thousand per cubic millimeter */
+    AND value_as_number <= 3.5;"
+COC09 Condition that is regionally dependent,"SELECT STATE,
+    count(*) AS total_enroled,
+    sum(lymed) AS lyme_cases,
+    ROUND((sum(lymed) / count(*)) * 100, 2) AS percentages
+FROM (
+    SELECT person.person_id,
+        state,
+        ISNULL(lymed, 0) lymed
+    FROM cdm.person
+    INNER JOIN cdm.location ON person.location_id = location.location_id
+    LEFT JOIN (
+        SELECT DISTINCT person_id,
+            1 AS lymed
+        FROM cdm.condition_era
+        INNER JOIN cdm.concept_relationship cr ON concept_id_1 = condition_concept_id
+        INNER JOIN cdm.concept c ON concept_id_2 = concept_id
+        WHERE (
+                (
+                    c.vocabulary_id = 'ICD9CM'
+                    AND c.concept_code = '088.81'
+                    )
+                OR (
+                    c.vocabulary_id = 'ICD10CM'
+                    AND c.concept_code LIKE 'A69.2%'
+                    )
+                )
+            AND cr.invalid_reason IS NULL
+            AND relationship_id = 'Mapped from'
+        ) lp ON lp.person_id = person.person_id
+    ) lyme_patients
+GROUP BY STATE
+ORDER BY 4 DESC;"
+COC10 Lenght of condition as function of treatment,"SELECT treatment,
+    count(*),
+    min(condition_days) AS min,
+    max(condition_days) AS max,
+    avg(condition_days) AS avg_condition_days
+FROM (
+    SELECT CASE
+            WHEN surgery = 1
+                THEN 'surgery'
+            WHEN drug = 1
+                AND pt = 1
+                THEN 'PT Rx'
+            WHEN drug = 1
+                THEN 'Rx Only'
+            ELSE 'No Treatment'
+            END AS treatment,
+        condition_days
+    FROM (
+        SELECT person_id,
+            diag_date,
+            max(drug) AS drug,
+            max(surgery) AS surgery,
+            max(pt) AS PT,
+            max(condition_days) AS condition_days
+        FROM /* back pain and treatments over following 60 days */ (
+            SELECT era.person_id,
+                condition_era_start_date AS diag_date,
+                datediff(day, condition_era_start_date, condition_era_end_date) AS condition_days,
+                ISNULL(drug, 0) AS drug,
+                ISNULL(surgery, 0) AS surgery,
+                ISNULL(pt, 0) AS pt
+            FROM cdm.condition_era era
+            INNER JOIN /* SNOMed codes for back pain */ (
+                 SELECT DISTINCT ca.descendant_concept_id
+            FROM cdm.concept_ancestor ca JOIN
+            ( SELECT cr.concept_id_2 AS target_concept_id
+                FROM cdm.concept_relationship cr
+                JOIN cdm.concept c1 ON cr.concept_id_1 = c1.concept_id
+                JOIN cdm.concept c2 ON cr.concept_id_2 = c2.concept_id
+                WHERE cr.relationship_id = 'Maps to'
+                AND c1.concept_code like '724%'
+                AND c2.standard_concept = 'S'
+                AND c1.vocabulary_id = 'ICD9CM'
+                AND c2.vocabulary_id = 'SNOMED'
+                AND cr.invalid_reason is null
+            ) t ON ca.ancestor_concept_id = t.target_concept_id            
+                    ) conditions ON descendant_concept_id = condition_concept_id
+            LEFT JOIN (
+                SELECT person_id,
+                    procedure_date,
+                    1 AS surgery
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4'
+                    AND concept_code IN ('22851', '20936', '22612', '22523', '22630', '22614*', '22842', '22632', '20930', '22524', '27130', '22525')
+                ) surgery ON surgery.person_id = era.person_id
+                AND surgery.procedure_date >= condition_era_start_date
+                AND surgery.procedure_date <= DATEADD(day, 60, condition_era_start_date)
+            LEFT JOIN (
+                SELECT person_id,
+                    procedure_date AS drug_date,
+                    1 AS drug
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4'
+                    AND concept_code IN ('20610', '20552', '207096', '20553', '20550', '20605', '20551', '20600', '23350')
+
+                UNION
+
+                SELECT person_id,
+                    drug_era_start_date,
+                    1
+                FROM cdm.drug_era
+                WHERE drug_concept_id IN (1125315, 778711, 1115008, 1177480, 1112807, 1506270)
+                ) drug ON drug.person_id = era.person_id
+                AND drug.drug_date >= condition_era_start_date
+                AND drug.drug_date <= DATEADD(day, 60, condition_era_start_date)
+            LEFT JOIN (
+                SELECT person_id,
+                    procedure_date AS pt_date,
+                    1 AS pt
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4'
+                    AND concept_code IN ('97001', '97140', '97002')
+
+                UNION
+
+                SELECT person_id,
+                    procedure_date AS pt_date,
+                    1 AS pt
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'HCPCS'
+                    AND concept_code = 'G0283'
+                ) pt ON pt.person_id = era.person_id
+                AND pt.pt_date >= condition_era_start_date
+                AND pt.pt_date <= DATEADD(day, 60, condition_era_start_date)
+            ) EV
+        WHERE diag_date > DATEFROMPARTS(2011, 01, 01)
+        GROUP BY person_id,
+            diag_date
+        ) AE
+    ) CE
+GROUP BY treatment
+ORDER BY treatment;"
+"COC11 Given a condition, what treatment did patient receive","SELECT treatment,
+    count(*)
+FROM (
+    SELECT CASE
+            WHEN surgery = 1
+                THEN 'surgery'
+            WHEN drug = 1
+                AND pt = 1
+                THEN 'PT Rx'
+            WHEN drug = 1
+                THEN 'Rx Only'
+            ELSE 'No Treatment'
+            END AS treatment
+    FROM (
+        SELECT person_id,
+            diag_date,
+            max(drug) AS drug,
+            max(surgery) AS surgery,
+            max(pt) AS PT
+        FROM /* back pain and treatments over following 60 days */
+            (
+            SELECT era.person_id,
+                condition_era_start_date AS diag_date,
+                ISNULL(drug, 0) AS drug,
+                ISNULL(surgery, 0) AS surgery,
+                ISNULL(pt, 0) AS pt
+            FROM cdm.condition_era era
+            INNER JOIN /* SNOMed codes for back pain */
+                (
+                SELECT DISTINCT ca.descendant_concept_id
+                FROM cdm.concept_ancestor ca
+                INNER JOIN (
+                    SELECT cr.concept_id_2 AS target_concept_id
+                    FROM cdm.concept_relationship cr
+                    INNER JOIN cdm.concept c1 ON cr.concept_id_1 = c1.concept_id
+                    INNER JOIN cdm.concept c2 ON cr.concept_id_2 = c2.concept_id
+                    WHERE cr.relationship_id = 'Maps to'
+                        AND c1.concept_code LIKE '724%'
+                        AND c2.standard_concept = 'S'
+                        AND c1.vocabulary_id = 'ICD9CM'
+                        AND c2.vocabulary_id = 'SNOMED'
+                        AND cr.invalid_reason IS NULL
+                    ) t ON ca.ancestor_concept_id = t.target_concept_id
+                ) conditions ON descendant_concept_id = condition_concept_id
+            LEFT JOIN /* surgery */
+                (
+                SELECT person_id,
+                    procedure_date,
+                    1 AS surgery
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4' /* CPT-4 */
+                    AND concept_code IN ('22851', '20936', '22612', '22523', '22630', '22614', '22842', '22632', '20930', '22524', '27130', '22525')
+                ) surgery ON surgery.person_id = era.person_id
+                AND surgery.procedure_date >= condition_era_start_date
+                AND surgery.procedure_date <= DATEADD(day, 60, condition_era_start_date)
+            LEFT JOIN /* drugs */
+                (
+                SELECT person_id,
+                    procedure_date AS drug_date,
+                    1 AS drug
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4' /* CPT-4 */
+                    AND concept_code IN ('20610', '20552', '207096', '20553', '20550', '20605', '20551', '20600', '23350')
+
+                UNION
+
+                SELECT person_id,
+                    drug_era_start_date,
+                    1
+                FROM cdm.drug_era
+                WHERE drug_concept_id IN (1125315, 778711, 1115008, 1177480, 1112807, 1506270)
+                ) drug ON drug.person_id = era.person_id
+                AND drug.drug_date >= condition_era_start_date
+                AND drug.drug_date <= DATEADD(day, 60, condition_era_start_date)
+            LEFT JOIN /* pt */
+                (
+                SELECT person_id,
+                    procedure_date AS pt_date,
+                    1 AS pt
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'CPT4' /* CPT-4 */
+                    AND concept_code IN ('97001', '97140', '97002')
+
+                UNION
+
+                SELECT person_id,
+                    procedure_date AS pt_date,
+                    1 AS pt
+                FROM cdm.procedure_occurrence pr
+                INNER JOIN cdm.concept ON concept_id = procedure_concept_id
+                WHERE vocabulary_id = 'HCPCS' /* HCPCS */
+                    AND concept_code = 'G0283'
+                ) pt ON pt.person_id = era.person_id
+                AND pt.pt_date >= condition_era_start_date
+                AND pt.pt_date <= DATEADD(day, 60, condition_era_start_date)
+            ) EV
+        WHERE diag_date > DATEFROMPARTS(2011, 01, 01)
+        GROUP BY person_id,
+            diag_date
+        ) AE
+    ) CE
+GROUP BY treatment
+ORDER BY treatment;"
+C01 Find condition by concept ID,"SELECT
+  c.concept_id       AS condition_concept_id,
+  c.concept_name     AS condition_concept_name,
+  c.concept_code     AS condition_concept_code,
+  c.concept_class_id AS condition_concept_class,
+  c.vocabulary_id    AS condition_concept_vocab_id,
+  CASE c.vocabulary_id
+  WHEN 'SNOMED'
+    THEN CASE lower(c.concept_class_id)
+         WHEN 'clinical finding'
+           THEN 'Yes'
+         ELSE 'No' END
+  WHEN 'MedDRA'
+    THEN 'Yes'
+  ELSE 'No'
+  END                AS is_disease_concept_flag
+FROM cdm.concept AS c
+WHERE
+  c.concept_id = 192671 AND 
+  c.invalid_reason IS NULL
+;"
+C02 Find a condition by keyword,"SELECT
+  t.entity_concept_id,
+  t.entity_name,
+  t.entity_code,
+  t.entity_concept_class,
+  t.entity_vocabulary_id
+FROM (
+       SELECT
+         c.concept_id       AS entity_concept_id,
+         c.concept_name     AS entity_name,
+         c.concept_code     AS entity_code,
+         c.concept_class_id AS entity_concept_class,
+         c.vocabulary_id    AS entity_vocabulary_id
+       FROM cdm.concept AS c
+         LEFT JOIN cdm.concept_synonym AS s ON c.concept_id = s.concept_id
+       WHERE
+          c.invalid_reason IS NULL AND
+         (c.vocabulary_id IN ('SNOMED', 'MedDRA') OR lower(c.concept_class_id) = 'clinical finding') AND
+         c.concept_class_id IS NOT NULL AND
+         (lower(c.concept_name) LIKE '%myocardial infarction%' OR
+          lower(s.concept_synonym_name) LIKE '%myocardial infarction%')
+     ) t
+ORDER BY t.entity_vocabulary_id, t.entity_name
+;"
+C03 Translate a SNOMED-CT concept into a MedDRA concept,"SELECT
+  d.concept_id        AS snomed_concept_id,
+  d.concept_name      AS snomed_concept_name,
+  d.concept_code      AS snomed_concept_code,
+  d.concept_class_id  AS snomed_concept_class,
+  cr.relationship_id  AS relationship_id,
+  r.relationship_name AS relationship_name,
+  a.concept_id        AS meddra_concept_id,
+  a.concept_name      AS meddra_concept_name,
+  a.concept_code      AS meddra_concept_code,
+  a.concept_class_id  AS meddra_concept_class
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS d ON cr.concept_id_1 = d.concept_id
+  JOIN cdm.concept AS a ON cr.concept_id_2 = a.concept_id
+  JOIN cdm.relationship AS r ON cr.relationship_id = r.relationship_id
+WHERE
+  cr.relationship_id = 'SNOMED - MedDRA eq' AND
+  cr.concept_id_1 = 312327 AND
+  cr.invalid_reason IS NULL
+;"
+C04 Translate a MedDRA concept into a SNOMED-CT concept,"SELECT
+  d.concept_id         AS meddra_concept_id,
+  d.concept_name       AS meddra_concept_name,
+  d.concept_code       AS meddra_concept_code,
+  d.concept_class_id   AS meddra_concept_class,
+  cr.relationship_id   AS relationship_id,
+  r.relationship_name  AS relationship_name,
+  a.concept_id         AS snomed_concept_id,
+  a.concept_name       AS snomed_concept_name,
+  a.concept_code       AS snomed_concept_code,
+  a.concept_class_id   AS snomed_concept_class
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS d ON cr.concept_id_1 = d.concept_id
+  JOIN cdm.concept AS a ON cr.concept_id_2 = a.concept_id
+  JOIN cdm.relationship AS r ON cr.relationship_id = r.relationship_id
+WHERE
+  cr.relationship_id = 'MedDRA - SNOMED eq' AND
+  cr.concept_id_1 = 35205180 AND
+  cr.invalid_reason IS NULL
+;"
+C05 Translate a source code to condition concepts,"SELECT DISTINCT
+  c1.concept_code     AS source_code,
+  c1.concept_name     AS source_name,
+  c1.vocabulary_id    AS source_vocabulary_id,
+  c2.concept_id       AS target_concept_id,
+  c2.concept_name     AS target_concept_name,
+  c2.concept_code     AS target_concept_code,
+  c2.concept_class_id AS target_concept_class,
+  c2.vocabulary_id    AS target_concept_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS c1 ON cr.concept_id_1 = c1.concept_id
+  JOIN cdm.concept AS c2 ON cr.concept_id_2 = c2.concept_id
+WHERE
+  cr.relationship_id = 'Maps to' AND
+  c1.concept_code IN ('070.0') AND
+  c1.vocabulary_id = 'ICD9CM' AND
+  c1.invalid_reason IS NULL
+;"
+C06 Translate a given condition to source codes,"SELECT DISTINCT
+  c1.concept_code     AS source_code,
+  c1.concept_name     AS source_name,
+  c1.vocabulary_id    AS source_vocabulary_id,
+  c1.domain_id        AS source_domain_id,
+  c2.concept_id       AS target_concept_id,
+  c2.concept_name     AS target_concept_name,
+  c2.concept_code     AS target_concept_code,
+  c2.concept_class_id AS target_concept_class,
+  c2.vocabulary_id    AS target_concept_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS c1 ON cr.concept_id_1 = c1.concept_id
+  JOIN cdm.concept AS c2 ON cr.concept_id_2 = c2.concept_id
+WHERE
+  cr.relationship_id = 'Mapped from' AND
+  c1.concept_id = 312327 AND
+  c2.invalid_reason IS NULL"
+C07 Find a pathogen by keyword,"SELECT
+  c.concept_id       AS pathogen_concept_id,
+  c.concept_name     AS pathogen_concept_name,
+  c.concept_code     AS pathogen_concept_code,
+  c.concept_class_id AS pathogen_concept_class,
+  c.standard_concept AS pathogen_standard_concept,
+  c.vocabulary_id    AS pathogen_concept_vocab_id
+FROM cdm.concept AS c
+WHERE
+  lower(c.concept_class_id) = 'organism' AND
+  lower(c.concept_name) LIKE '%trypanosoma%' AND
+  c.invalid_reason IS NULL
+;"
+C08 Find a disease causing agent by keyword,"SELECT
+  c.concept_id       AS agent_concept_id,
+  c.concept_name     AS agent_concept_name,
+  c.concept_code     AS agent_concept_code,
+  c.concept_class_id AS agent_concept_class,
+  c.standard_concept AS agent_standard_concept,
+  c.vocabulary_id    AS agent_concept_vocab_id
+FROM cdm.concept AS c
+WHERE
+  lower(c.concept_class_id) IN ('pharmaceutical / biologic product', 'physical object',
+                                'special concept', 'event', 'physical force', 'substance') AND
+  lower(c.concept_name) LIKE '%radiation%' AND
+  c.invalid_reason IS NULL
+;"
+C09 Find all SNOMED-CT condition concepts that can be caused by a given pathogen or causative agent,"SELECT
+  a.concept_id       AS condition_id,
+  a.concept_name     AS condition_name,
+  a.concept_code     AS condition_code,
+  a.concept_class_id AS condition_class,
+  a.vocabulary_id    AS condition_vocab_id,
+  d.concept_id       AS causative_agent_id,
+  d.concept_name     AS causative_agent_name,
+  d.concept_code     AS causative_agent_code,
+  d.concept_class_id AS causative_agent_class,
+  d.vocabulary_id    AS causative_agent_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS a ON cr.concept_id_1 = a.concept_id
+  JOIN cdm.concept AS d ON cr.concept_id_2 = d.concept_id
+WHERE
+  cr.relationship_id = 'Has causative agent' AND
+  d.concept_id = 4248851 AND
+  cr.invalid_reason IS NULL
+;"
+C10 Find an anatomical site by keyword,"SELECT
+  c.concept_id       AS anatomical_site_id,
+  c.concept_name     AS anatomical_site_name,
+  c.concept_code     AS anatomical_site_code,
+  c.concept_class_id AS anatomical_site_class,
+  c.standard_concept AS anatomical_standard_concept,
+  c.vocabulary_id    AS anatomical_site_vocab_id
+FROM cdm.concept AS c
+WHERE
+  lower(c.concept_class_id) = 'body structure' AND
+  lower(c.concept_name) LIKE '%epiglottis%' AND
+  c.invalid_reason IS NULL
+;"
+C11 Find all SNOMED-CT condition concepts that are occurring at an anatomical site,"SELECT
+  a.concept_id       AS condition_id,
+  a.concept_name     AS condition_name,
+  a.concept_code     AS condition_code,
+  a.concept_class_id AS condition_class,
+  a.vocabulary_id    AS condition_vocab_id,
+  d.concept_id       AS anatomical_site_id,
+  d.concept_name     AS anatomical_site_name,
+  d.concept_code     AS anatomical_site_code,
+  d.concept_class_id AS anatomical_site_class,
+  d.vocabulary_id    AS anatomical_site_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS a ON cr.concept_id_1 = a.concept_id
+  JOIN cdm.concept AS d ON cr.concept_id_2 = d.concept_id
+WHERE
+  cr.relationship_id = 'Has finding site' AND
+  d.concept_id = 4103720 AND
+  cr.invalid_reason IS NULL
+;"
+DRC01 What is the average/max/min cost per pill (total cost / quantity) per drug concept?,"SELECT  t.drug_concept_id,
+        avg(t.cost_per_pill) avg_val_num, 
+        max(t.cost_per_pill) max_val_num, 
+        min(t.cost_per_pill) min_val_num
+from (
+    SELECT c.total_paid/d.quantity as cost_per_pill, d.drug_concept_id
+    FROM cdm.cost c
+    JOIN cdm.drug_exposure d
+        ON d.drug_exposure_id = c.cost_event_id
+    WHERE d.quantity > 0
+        AND d.drug_concept_id IN (906805, 1517070, 19010522) 
+) t
+GROUP BY t.drug_concept_id
+ORDER BY t.drug_concept_id;"
+DRC03 What is out-of-pocket cost for a given drug?,"SELECT d.drug_concept_id, avg(c.paid_by_patient - c.paid_patient_copay) AS avg_out_pocket_cost
+FROM cdm.cost c
+JOIN cdm.drug_exposure d
+  ON d.drug_exposure_id = c.cost_event_id
+WHERE d.drug_exposure_id = c.cost_event_id
+  AND (c.paid_by_patient - c.paid_patient_copay) > 0
+  AND d.drug_concept_id
+    IN (906805, 1517070, 19010522)
+GROUP BY d.drug_concept_id;"
+DRC07 Distribution of costs paid by payer.,"WITH tt AS (
+    SELECT c1.paid_patient_coinsurance                                         AS stat_value,
+           ROW_NUMBER() OVER (ORDER BY c1.paid_patient_coinsurance)            AS order_nr,
+           (SELECT COUNT(*) FROM cdm.cost WHERE paid_patient_coinsurance > 0) AS population_size
+    FROM cdm.cost c1
+    WHERE c1.paid_patient_coinsurance > 0
+)
+SELECT MIN(tt.stat_value)                                                            AS min_value,
+       MAX(tt.stat_value)                                                            AS max_value,
+       AVG(tt.stat_value)                                                            AS avg_value,
+       (ROUND(STDEV(tt.stat_value), 0))                                              AS STDEV_value,
+       MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END) AS percentile_25,
+       MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END) AS median_value,
+       MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END) AS percentile_75
+FROM tt;"
+DER01 Which drug exposure records belong to a drug era?,"select *
+ from        cdm.drug_exposure e
+ where
+         exists
+                (
+                select 1
+                from
+                        cdm.drug_era r ,
+                        cdm.concept_ancestor m
+                where
+                        r.drug_era_id = 20
+                and r.person_id = e.person_id
+                and r.drug_concept_id = m.ancestor_concept_id
+                and e.drug_concept_id = m.descendant_concept_id
+                and (e.drug_exposure_start_date >= r.drug_era_start_date) AND (e.drug_exposure_start_date <= r.drug_era_end_date)
+                )"
+DER02 What is cost of ERA? - era -> exposure -> cost,"SELECT        sum(ISNULL(c.total_paid, 0)) as total_cost4era
+FROM        cdm.drug_exposure e,
+            cdm.cost c
+WHERE
+        exists
+                (
+                select        1
+                from        cdm.drug_era r,
+                            cdm.concept_ancestor m
+                where
+                        r.drug_era_id = 20--&era_id
+                        and r.person_id = e.person_id
+                        and r.drug_concept_id = m.ancestor_concept_id
+                        and e.drug_concept_id = m.descendant_concept_id
+                        and (e.drug_exposure_start_date >= r.drug_era_start_date) AND (e.drug_exposure_start_date <= r.drug_era_end_date)
+                )
+AND e. drug_exposure_id = c.cost_event_id"
+DER03 What is the number of distinct ingredients per patient?,"SELECT
+        avg(cnt)
+from
+        (
+                select
+                        count(distinct r.drug_concept_id) cnt,
+                        r.person_id
+                FROM
+                        cdm.drug_era r
+                GROUP BY
+                        r.person_id
+        ) a"
+DER04 What proportion of observation time is a person exposed to a given drug?,"SELECT (CASE WHEN o.totalObs = 0 THEN 0 ELSE 100 * (e.totExposure * 1.0 / o.totalObs * 1.0) END) AS proportion
+FROM (
+         SELECT SUM(datediff(day, r.drug_era_start_date, r.drug_era_end_date)) AS totExposure,
+                r.person_id
+         FROM cdm.drug_era r
+         WHERE r.person_id = 9717995
+           AND r.drug_concept_id = 1549080
+         GROUP BY r.person_id
+     ) e
+JOIN
+     (
+         SELECT sum(datediff(day, p.observation_period_start_date, p.observation_period_end_date)) AS totalObs,
+                p.person_id
+         FROM cdm.observation_period p
+         GROUP BY p.person_id
+     ) o
+    ON o.person_id = e.person_id;"
+"DER05 For a given indication, what proportion of patients take each indicated treatment?","SELECT tt.concept_id, tt.concept_name, 100*(tt.cntPersons*1.0/tt.total*1.0) AS proportion FROM (
+SELECT c.concept_id, c.concept_name, t.cntPersons, sum(cntPersons) over() AS total
+FROM cdm.concept c,
+(SELECT er.drug_concept_id, count(DISTINCT er.person_id) AS cntPersons
+FROM  cdm.concept_relationship cr,
+         cdm.concept_ancestor ca,
+      cdm.drug_era er
+WHERE cr.concept_id_1 = ca.descendant_concept_id
+  and er.drug_concept_id = ca.ancestor_concept_id
+  and cr.concept_id_2 = 21001738--&era_id -- &Indication_id
+  -- allow only indication relationships
+  and cr.relationship_id IN ('Has FDA-appr ind', 'Has off-label ind', 'May treat', 'May prevent', 'CI by', 'Is off-label ind of', 'Is FDA-appr ind of', 'May be treated by')
+GROUP BY er.drug_concept_id, cr.concept_id_2
+) t
+WHERE t.drug_concept_id = c.concept_id
+) tt"
+"DER06 For a given class, what proportion of patients take each treatment in the class?","select        tt.concept_id,
+                tt.concept_name,
+                100*(tt.cntPersons*1.0/tt.total*1.0) as proportion_count
+from
+        (
+        select        c.concept_id,
+                        c.concept_name,
+                        t.cntPersons,
+                        sum(cntPersons) over() as total
+        from        cdm.concept c,
+                        (
+                        select        r.drug_concept_id,
+                                        count(distinct r.person_id) as cntPersons
+                        FROM        cdm.concept_ancestor ca,
+                                        cdm.drug_era r
+                        WHERE
+                                ca.ancestor_concept_id        = 4324992
+                        AND        r.drug_concept_id                = ca.descendant_concept_id
+                        group by
+                                r.drug_concept_id
+                        ) t
+        where
+                t.drug_concept_id = c.concept_id
+        ) tt;"
+DER07 What is the average time between eras for a given ingredient? ex. steroids for RA,"SELECT avg(datediff(day, t.drug_era_end_date, t.next_era_start)) AS num_days
+FROM (
+         SELECT r.drug_era_end_date,
+                lead(r.drug_era_start_date)
+                OVER (PARTITION BY r.person_id, r.drug_concept_id ORDER BY r.drug_era_start_date) AS next_era_start
+         FROM cdm.drug_era r
+         WHERE r.drug_concept_id = 1304643
+     ) t
+WHERE t.next_era_start IS NOT NULL"
+DER08 Counts of drug records,"SELECT count(1) AS total_count FROM cdm.drug_era r WHERE r.drug_concept_id in (1304643, 1549080);"
+DER09 Counts of persons taking drugs,"select count(distinct r.person_id) as persons_count
+from cdm.drug_era r
+where r.drug_concept_id in (1304643, 1549080);"
+DER10 Distribution of drug era end dates,"SELECT DISTINCT MIN(tt.end_date) over () AS min_date
+,      MAX(tt.end_date) over () AS max_date
+,      DATEADD(day, (AVG(CAST(tt.end_date_num AS BIGINT)) OVER ()), tt.min_date) AS avg_date
+,      ROUND(STDEV(tt.end_date_num) over (), 0) AS STDEV_days
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .25 * tt.population_size THEN 9999 ELSE tt.end_date_num END) over (), tt.min_date) AS percentile_25_date
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .50 * tt.population_size THEN 9999 ELSE tt.end_date_num END) over (), tt.min_date) AS median_date
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .75 * tt.population_size THEN 9999 ELSE tt.end_date_num END) over (), tt.min_date) AS percentile_75_date
+FROM
+    (
+        SELECT DATEDIFF(day, (MIN(t.drug_era_end_date) OVER()), t.drug_era_end_date) AS end_date_num
+        ,      t.drug_era_end_date AS end_date
+        ,      MIN(t.drug_era_end_date) OVER() AS min_date
+        ,      MAX(t.drug_era_end_date) OVER () AS max_date
+        ,      ROW_NUMBER() OVER (ORDER BY t.drug_era_end_date) order_nr
+        ,      (SELECT COUNT(*) FROM cdm.drug_era) AS population_size
+        FROM cdm.drug_era t
+    ) tt
+GROUP BY tt.order_nr
+,        tt.population_size
+,        tt.min_date
+,        tt.end_date
+,        tt.end_date_num;"
+DER11 Distribution of drug era start dates,"SELECT DISTINCT MIN(tt.start_date) OVER () AS min_date
+,      MAX(tt.start_date) OVER () AS max_date
+,      DATEADD(day, (AVG(CAST(tt.start_date_num AS BIGINT)) OVER ()), tt.min_date) AS avg_date
+,      ROUND(STDEV(tt.start_date_num) OVER (), 0) AS STDEV_days
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .25 * tt.population_size THEN 9999 ELSE tt.start_date_num END) over (), tt.min_date) AS percentile_25_date
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .50 * tt.population_size THEN 9999 ELSE tt.start_date_num END) over (), tt.min_date) AS median_date
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .75 * tt.population_size THEN 9999 ELSE tt.start_date_num END) over (), tt.min_date) AS percentile_75_date
+FROM (
+       SELECT DATEDIFF(day, (MIN(t.drug_era_start_date) OVER()), t.drug_era_start_date) AS start_date_num
+       ,      t.drug_era_start_date AS start_date
+       ,      MIN(t.drug_era_start_date) OVER() min_date
+       ,      MAX(t.drug_era_start_date) OVER() max_date
+       ,      ROW_NUMBER() OVER (ORDER BY t.drug_era_start_date) order_nr
+       ,      (SELECT COUNT(*) FROM cdm.drug_era) AS population_size
+       FROM cdm.drug_era t
+) tt
+GROUP BY tt.order_nr
+,        tt.population_size
+,        tt.min_date
+,        tt.start_date
+,        tt.start_date_num;"
+DER12 Counts of drug types,"select count(1) as cntRecs, r.drug_type_concept_id
+from cdm.drug_exposure r
+group by r.drug_type_concept_id;"
+DER13 Distribution of number of distinct drugs persons take,"WITH tt AS (
+  SELECT COUNT(DISTINCT t.drug_concept_id) AS stat_value
+  ,      ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT t.drug_concept_id)) order_nr
+  ,      (SELECT COUNT(DISTINCT person_id) FROM cdm.drug_era) AS population_size
+  FROM cdm.drug_era t
+  WHERE ISNULL(t.drug_concept_id, 0) > 0
+  GROUP BY t.person_id
+)
+SELECT MIN(tt.stat_value) AS min_value
+,      MAX(tt.stat_value) AS max_value
+,      AVG(tt.stat_value) AS avg_value
+,      ROUND(STDEV(tt.stat_value), 0) AS STDEV_value
+,      MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END) AS percentile_25
+,      MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END) AS median_value
+,      MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END) AS percentile_75
+FROM tt;"
+DER14 Counts of number of distinct drugs persons take,"SELECT count(
+distinct t.drug_concept_id) AS drug_count, t.person_id
+FROM cdm.drug_era t
+group by t.person_id
+having count(
+distinct t.drug_concept_id)
+in (3, 4);"
+DER15 Distribution of drug era records per person,"WITH tt AS
+(
+  SELECT COUNT(1) AS stat_value
+  ,      ROW_NUMBER() OVER (ORDER BY COUNT(1)) order_nr
+  ,      (SELECT COUNT(DISTINCT person_id) FROM cdm.drug_era) AS population_size
+  FROM cdm.drug_era t
+  GROUP BY t.person_id
+)
+SELECT MIN(tt.stat_value) AS min_value
+,      MAX(tt.stat_value) AS max_value
+,      AVG(tt.stat_value) AS avg_value
+,      ROUND(STDEV(tt.stat_value), 0) AS STDEV_value
+,      MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END) AS percentile_25
+,      MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END) AS median_value
+,      MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END) AS percentile_75
+FROM tt;"
+DER16 Counts of drug era records per person,"SELECT
+  count(1) AS s_count,
+  t.person_id
+FROM cdm.drug_era t
+group by t.person_id
+having count(1) in (3, 4);"
+DER17 Counts of drug era records stratified by observation month,"SELECT MONTH(er.drug_era_start_date) month_num, COUNT(1) as eras_in_month_count
+FROM cdm.drug_era er
+WHERE MONTH(er.drug_era_start_date)
+IN (3, 5)
+GROUP BY MONTH(er.drug_era_start_date)
+ORDER BY 1;"
+"DER18 Distribution of age, stratified by drug","SELECT drug_concept_id
+,      min_value
+,      max_value
+,      avg_value
+,      MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END) AS percentile_25
+,      MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END) AS median_value
+,      MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END) AS percentile_75
+FROM (
+         SELECT tt.drug_concept_id
+         ,      tt.stat_value
+         ,      MIN(tt.stat_value) OVER (partition by tt.drug_concept_id) AS min_value
+         ,      MAX(tt.stat_value) OVER (partition by tt.drug_concept_id) AS max_value
+         ,      AVG(tt.stat_value) OVER (partition by tt.drug_concept_id) AS avg_value
+         ,      ROW_NUMBER() OVER (PARTITION BY tt.drug_concept_id ORDER BY tt.drug_concept_id, tt.stat_value) order_nr
+         ,      population_size
+         FROM (
+                  SELECT YEAR((min(t1.drug_era_start_date) over (partition by t1.person_id, t1.drug_concept_id))) -
+                              p1.year_of_birth as stat_value
+                  ,      t1.drug_concept_id
+                  FROM cdm.drug_era t1,
+                       cdm.person p1
+                  WHERE t1.person_id = p1.person_id
+                    AND t1.drug_concept_id in (1300978, 1304643, 1549080)
+              ) tt
+         INNER JOIN (
+             SELECT t2.drug_concept_id
+             ,      COUNT(t2.drug_concept_id) as population_size
+             FROM cdm.drug_era t2,
+                  cdm.person p2
+             WHERE t2.person_id = p2.person_id
+               AND t2.drug_concept_id in (1300978, 1304643, 1549080)
+             GROUP BY t2.drug_concept_id
+         ) population_sizes
+         ON tt.drug_concept_id = population_sizes.drug_concept_id
+     ) ordered_data
+GROUP BY ordered_data.drug_concept_id
+,        min_value
+,        max_value
+,        avg_value"
+"DER21 Counts of drugs, stratified by year, age group and gender","SELECT
+  tt.drug_concept_id,
+  count(1) as s_count,
+  tt.age_band,
+  tt.year_of_Era,
+  tt.gender_concept_id
+from (
+  SELECT
+    floor( (YEAR(t.drug_era_start_date ) - p.year_of_birth )/10 ) as age_band,
+        YEAR(t.drug_era_start_date) as year_of_era,
+        p.gender_concept_id,
+        t.drug_concept_id
+  FROM
+    cdm.drug_era t,
+    cdm.person p
+  where
+    t.person_id = p.person_id and
+    t.drug_concept_id in (1300978, 1304643, 1549080)
+) tt
+where
+  tt.age_band in(3,4) and
+  tt.year_of_Era in( 2007, 2008)
+group by
+  tt.age_band,
+  tt.year_of_Era,
+  tt.gender_concept_id,
+  tt.drug_concept_id
+order by
+  tt.age_band,
+  tt.year_of_Era,
+  tt.gender_concept_id,
+  tt.drug_concept_id
+;"
+"DER23 Distribution of drug era start dates, stratified by drug","WITH drugs AS (
+         SELECT DISTINCT drug_concept_id
+         FROM   cdm.drug_era
+         WHERE drug_concept_id IN (1300978, 1304643, 1549080)
+     ),
+     start_date AS (
+         SELECT t1.drug_concept_id
+         ,      drug_era_start_date start_date
+         ,      MIN(t1.drug_era_start_date) OVER(partition by t1.drug_concept_id) min_start_date
+         ,      DATEDIFF(day, MIN(t1.drug_era_start_date) OVER(PARTITION BY t1.drug_concept_id), t1.drug_era_start_date) AS start_date_num
+         FROM cdm.drug_era t1
+         WHERE t1.drug_concept_id IN (SELECT drug_concept_id FROM drugs)
+     ),
+     tt AS (
+         SELECT start_date.drug_concept_id
+              , start_date.start_date
+              , start_date.min_start_date AS min_date
+              , start_date.start_date_num
+              , COUNT(*) OVER ( PARTITION BY start_date.drug_concept_id) AS population_size
+              , ROW_NUMBER() OVER (PARTITION BY start_date.drug_concept_id ORDER BY start_date.drug_concept_id, start_date.start_date_num) order_nr
+         FROM start_date
+     )
+SELECT tt.drug_concept_id
+,      MIN(tt.start_date_num) AS min_value
+,      MAX(tt.start_date_num) AS max_value
+,      DATEADD(day, AVG(CAST(tt.start_date_num AS BIGINT)), tt.min_date) AS avg_value
+,      ROUND(STDEV(tt.start_date_num), 0) AS STDEV_value
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .25 * tt.population_size THEN 99999999 ELSE tt.start_date_num END), tt.min_date) AS percentile_25
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .50 * tt.population_size THEN 99999999 ELSE tt.start_date_num END), tt.min_date) AS median_value
+,      DATEADD(day, MIN(CASE WHEN tt.order_nr < .75 * tt.population_size THEN 99999999 ELSE tt.start_date_num END), tt.min_date) AS percentile_75
+FROM tt
+GROUP BY tt.drug_concept_id
+,        tt.min_date
+ORDER BY drug_concept_id;"
+"DER26 Counts of genders, stratified by drug","SELECT p.gender_concept_id, t.drug_concept_id, count(1) AS count 
+FROM cdm.drug_era t 
+JOIN cdm.person p
+    ON p.person_id = t.person_id
+WHERE t.drug_concept_id IN (1300978, 1304643, 1549080)
+    AND p.gender_concept_id IN (8507, 8532)
+GROUP BY t.drug_concept_id, p.gender_concept_id
+ORDER BY t.drug_concept_id, p.gender_concept_id;"
+DEX01 Counts of persons with any number of exposures to a certain drug,"SELECT 
+  c.concept_name AS drug_name, 
+  drug_concept_id, 
+  COUNT(person_id) AS num_persons 
+FROM cdm.drug_exposure 
+INNER JOIN cdm.concept c
+ON drug_concept_id = c.concept_id
+WHERE domain_id='Drug' 
+      AND vocabulary_id='RxNorm' 
+      AND standard_concept='S'
+      AND drug_concept_id in (40165254, 40165258 ) --Input list of drug concept_id
+GROUP BY c.concept_name, drug_concept_id;"
+"DEX02 Counts of persons taking a drug, by age, gender, and year of exposure","SELECT concept_name AS drug_name,
+    year_of_exposure,
+    age,
+    gender,
+    count(*) AS num_persons
+FROM (
+    SELECT DISTINCT drug.concept_name,
+        de.person_id,
+        gender.concept_name AS gender,
+        YEAR(drug_exposure_start_date) AS year_of_exposure,
+        YEAR(drug_exposure_start_date) - year_of_birth AS age
+    FROM cdm.drug_exposure de
+    INNER JOIN cdm.person p ON de.person_id = p.person_id
+    INNER JOIN cdm.concept drug ON drug.concept_id = drug_concept_id
+    INNER JOIN cdm.concept gender ON gender.concept_id = gender_concept_id
+    WHERE drug_concept_id IN (40165254, 40165258)
+    ) EV
+GROUP BY concept_name,
+    gender,
+    year_of_exposure,
+    age
+ORDER BY concept_name,
+    year_of_exposure,
+    age,
+    gender;"
+"DEX03 Distribution of age, stratified by drug","WITH first_exposure AS
+  ( SELECT person_id, drug_concept_id, min(drug_exposure_start_date) as drug_exposure_start_date
+    FROM cdm.drug_exposure
+    WHERE drug_concept_id
+       IN  /*crestor 20 and 40 mg tablets */
+                    (40165254, 40165258)
+    GROUP BY person_id, drug_concept_id                
+  )
+SELECT
+  concept_name                                                           AS drug_name,
+  ordered_data.drug_concept_id                                           AS drug_concept_id,
+  COUNT(*)                                                               AS patient_count,
+  MIN(age)                                                               AS min,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE age END) AS percentile_25,
+  round(avg(age), 2)                                                     AS mean,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE age END) AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE age END) AS percentile_75,
+  max(age)                                                               AS max,
+  round(STDEV(age), 1)                                                   AS STDEV
+FROM
+ ( SELECT
+    drug_concept_id,
+    YEAR(drug_exposure_start_date) - year_of_birth                                                                  AS age,
+    ROW_NUMBER() OVER (PARTITION BY drug_concept_id ORDER BY (YEAR(drug_exposure_start_date) - year_of_birth)) AS order_nr
+   FROM first_exposure
+   INNER JOIN cdm.person
+     ON first_exposure.person_id = person.person_id
+ ) AS ordered_data
+INNER JOIN
+ ( SELECT
+    drug_concept_id,
+    COUNT(*) AS population_size
+  FROM first_exposure
+  GROUP BY drug_concept_id
+ ) AS population_sizes
+ON ordered_data.drug_concept_id = population_sizes.drug_concept_id
+  JOIN cdm.concept ON concept_id = population_sizes.drug_concept_id
+GROUP BY concept_name, ordered_data.drug_concept_id
+ORDER BY ordered_data.drug_concept_id DESC;"
+DEX04 Distribution of gender in persons taking a drug,"SELECT drug.concept_name AS drug_name,
+    drug_concept_id,
+    gender.concept_name AS gender,
+    count(DISTINCT de.person_id) AS num_persons
+FROM cdm.drug_exposure de
+INNER JOIN cdm.person p ON de.person_id = p.person_id
+INNER JOIN cdm.concept drug ON drug.concept_id = drug_concept_id
+INNER JOIN cdm.concept gender ON gender.concept_id = gender_concept_id
+WHERE drug_concept_id IN (40165254, 40165258)
+GROUP BY drug.concept_name,
+    drug_concept_id,
+    gender.concept_name
+ORDER BY drug_name,
+    drug_concept_id,
+    gender;"
+DEX05 Counts of drug records for a particular drug,"SELECT
+  concept_name      AS drug_name,
+  drug_concept_id,
+  COUNT(*)          AS num_records
+FROM cdm.drug_exposure
+INNER JOIN cdm.concept
+ON concept_id = drug_concept_id
+WHERE LOWER(domain_id)='drug'
+      AND vocabulary_id='RxNorm'
+      -- Retrieve standard concepts
+      AND standard_concept='S'
+      -- List of input drug_concept_id
+      AND drug_concept_id IN (40165254,40165258)
+GROUP BY concept_name, drug_concept_id;"
+DEX06 Counts of distinct drugs in the database,"SELECT
+  COUNT(DISTINCT drug_concept_id) AS number_drugs
+FROM cdm.drug_exposure
+INNER JOIN cdm.concept
+ON concept_id = drug_concept_id
+WHERE LOWER(domain_id)='drug'
+      AND vocabulary_id='RxNorm'
+      AND standard_concept='S';"
+DEX07 Maximum number of drug exposure events per person over some time period,"SELECT max(exposures) AS exposures_count
+FROM (
+    SELECT drug_exposure.person_id,
+        COUNT(*) exposures
+    FROM cdm.drug_exposure
+    INNER JOIN cdm.person ON drug_exposure.person_id = person.person_id
+    WHERE drug_concept_id IN (
+            SELECT DISTINCT concept_id
+            FROM cdm.concept
+            WHERE domain_id = 'Drug'
+                AND standard_concept = 'S'
+            )
+        AND drug_exposure_start_date >= DATEFROMPARTS(2017, 01, 01)
+        AND drug_exposure_start_date <= DATEFROMPARTS(2017, 12, 31)
+    GROUP BY drug_exposure.person_id
+    ) EV;"
+DEX08 Maximum number of distinct drugs per person over some time period,"select max(drugs) as drugs_count from
+(SELECT
+COUNT( DISTINCT drug_concept_id) drugs
+FROM cdm.drug_exposure JOIN cdm.person
+ON drug_exposure.person_id = person.person_id
+WHERE
+drug_concept_id in (select distinct concept_id from cdm.concept
+                        WHERE domain_id='Drug' and standard_concept='S')
+ AND drug_exposure_start_date >= DATEFROMPARTS(2017, 01, 01)
+AND drug_exposure_start_date <= DATEFROMPARTS(2017, 12, 31)
+GROUP BY drug_exposure.person_id) EV;"
+DEX09 Distribution of distinct drugs per person over some time period,"WITH drug_counts
+AS (
+    SELECT DE.person_id,
+        COALESCE(drugs, 0) AS drugs
+    FROM cdm.person p
+    LEFT JOIN (
+        SELECT person_id,
+            COUNT(DISTINCT drug_concept_id) AS drugs
+        FROM cdm.drug_exposure
+        WHERE drug_exposure_start_date >= DATEFROMPARTS(2017, 01, 01)
+            AND drug_exposure_start_date <= DATEFROMPARTS(2017, 12, 31)
+        GROUP BY person_id
+        ) DE ON DE.person_id = p.person_id
+    )
+SELECT MIN(drugs) AS min,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE drugs END) AS percentile_25,
+    ROUND(CAST(AVG(drugs) AS NUMERIC), 2) AS mean,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE drugs END) AS median,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE drugs END) AS percentile_75,
+    MAX(drugs) AS max,
+    ROUND(CAST(STDEV(drugs) AS NUMERIC), 1) AS STDEV
+FROM (
+    SELECT person_id,
+        drugs,
+        ROW_NUMBER() OVER (
+            ORDER BY drugs
+            ) AS order_nr
+    FROM drug_counts
+    ) AS ordered_data
+CROSS JOIN (
+    SELECT count(*) AS population_size
+    FROM drug_counts
+    ) AS population;"
+DEX10 Other drugs (conmeds) patients exposed to a certain drug take over some time period,"SELECT concept_name AS drug_name,
+    COUNT(1) AS persons
+FROM (
+    --Other drugs people are taking
+    SELECT DISTINCT cohort.person_id,
+        drug.drug_concept_id
+    FROM (
+        --person with specific drug in time frame
+        SELECT DISTINCT person_id,
+            drug_concept_id,
+            from_date,
+            to_date
+        FROM cdm.drug_exposure
+        INNER JOIN (
+            --date range
+            SELECT DATEFROMPARTS(2008, 01, 01) AS from_date,
+                DATEFROMPARTS(2008, 12, 31) AS to_date
+            ) dates ON drug_exposure_start_date BETWEEN from_date
+                AND to_date
+        WHERE drug_concept_id IN /*bortezomib, Thalidomide 50 mg capsules */ (1336825, 19047763)
+        ) cohort
+    INNER JOIN cdm.drug_exposure drug ON drug.person_id = cohort.person_id
+        AND drug.drug_concept_id != cohort.drug_concept_id
+        AND drug.drug_exposure_start_date >= start_date AND drug.drug_exposure_start_date <= to_date
+    WHERE drug.drug_concept_id != 0 /* unmapped drug */
+    ) events
+INNER JOIN cdm.concept ON concept_id = drug_concept_id
+GROUP BY concept_name
+ORDER BY persons DESC;"
+DEX11 Distribution of brands used for a given generic drug,"SELECT drug_name,
+       brand_name,
+       100.00*cn_3_02/SUM(cn_3_02) OVER() AS perc_brand_count
+  FROM (
+SELECT A.concept_name  AS drug_name,
+       D.concept_name  AS brand_name,
+       COUNT(*)        AS cn_3_02
+  FROM cdm.concept AS A
+  JOIN cdm.concept_relationship AS CR003
+    ON CR003.concept_id_1        = A.concept_id
+  JOIN cdm.concept_relationship AS CR007
+    ON CR007.concept_id_2        = CR003.concept_id_2
+  JOIN cdm.concept_relationship AS CR006
+    ON CR007.concept_id_1        = CR006.concept_id_1
+  JOIN cdm.concept D
+    ON CR006.concept_id_2        = D.concept_id
+  LEFT JOIN cdm.drug_exposure de
+    ON de.drug_concept_id        = cr003.concept_id_2
+ WHERE CR003.relationship_ID     = 'Has tradename'
+   AND A.concept_class_id        = 'Clinical Drug'
+   AND CR007.relationship_ID     = 'Constitutes'
+   AND CR006.relationship_ID     = 'Has brand name'
+   AND D.concept_class_id        = 'Brand Name'
+   AND A.concept_id              = 35606533
+ GROUP BY A.concept_name, D.concept_name
+       ) TMP;"
+DEX12 Distribution of forms used for a given ingredient,"SELECT form_name,
+       100.00 * cn / SUM(cn) OVER() AS percent_forms
+  FROM (
+SELECT drugform.concept_name AS form_name,
+       COUNT(*)              AS cn
+  FROM cdm.concept ingredient
+  JOIN cdm.concept_ancestor a
+    ON ingredient.concept_id = a.ancestor_concept_id
+  JOIN cdm.concept drug
+    ON a.descendant_concept_id = drug.concept_id
+  JOIN cdm.concept_relationship r
+    ON drug.concept_id = r.concept_id_1
+  JOIN cdm.concept drugform
+    ON r.concept_id_2 = drugform.concept_id
+ WHERE ingredient.concept_id        = 1125315 --Acetaminophen
+   AND ingredient.concept_class_id  = 'Ingredient'
+   AND drug.standard_concept        = 'S'
+   AND drugform.concept_class_id    = 'Dose Form'
+ GROUP BY drugform.concept_name
+HAVING COUNT(*) > 0
+       ) TMP
+ ORDER BY percent_forms desc;"
+DEX13 Distribution of provider specialities prescribing a given drug,"SELECT c.concept_name AS specialty,
+       COUNT(*)       AS prescriptions_count
+  FROM cdm.drug_exposure drug
+  JOIN cdm.provider p
+    ON p.provider_id = drug.provider_id
+  JOIN cdm.concept c
+    ON c.concept_id  = p.specialty_concept_id
+ WHERE c.vocabulary_id           = 'Specialty'
+   AND drug.drug_concept_id      = 2213473  /* Influenza virus vaccine */
+   AND c.standard_concept  = 'S'
+ GROUP BY c.concept_name
+ ORDER BY prescriptions_count desc;"
+"DEX14 Among people who take drug A, how many take drug B at the same time?","WITH statins AS (
+SELECT descendant_concept_id AS concept_id
+  FROM cdm.concept_ancestor
+ WHERE ancestor_concept_id = 1539403
+), diuretics AS (
+SELECT descendant_concept_id AS concept_id
+  FROM cdm.concept_ancestor
+ WHERE ancestor_concept_id = 974166
+)
+SELECT COUNT(DISTINCT de1.person_id) AS num_users,
+       COUNT(DISTINCT de2.person_id) AS also_bp
+  FROM cdm.drug_exposure de1
+  JOIN statins s
+    ON de1.drug_concept_id = s.concept_id
+  JOIN cdm.drug_exposure de2
+    ON de1.person_id = de2.person_id
+  LEFT JOIN diuretics d
+    ON de2.drug_concept_id = d.concept_id
+   AND de2.drug_exposure_start_date < de1.drug_exposure_end_date
+   AND de2.drug_exposure_end_date   > de1.drug_exposure_start_date;"
+DEX15 Number of persons taking a given drug having at least a 180 day period prior and a 365 day follow-up period,"WITH statins AS (
+SELECT descendant_concept_id AS concept_id
+  FROM cdm.concept_ancestor
+ WHERE ancestor_concept_id = 1539403
+), statin_users AS (
+SELECT de.person_id, MIN(de.drug_exposure_start_date) AS index_date
+  FROM cdm.drug_exposure de
+  JOIN statins s
+    ON de.drug_concept_id = s.concept_id
+ GROUP BY de.person_id
+)    
+SELECT FLOOR(1.0*DATEDIFF(d,su.index_date,op.observation_period_end_date)/365) AS follow_up_years,
+       COUNT(*) AS persons
+       /* statin users with 180 clean period and at least 1 year follow up period */
+  FROM statin_users su
+  JOIN cdm.observation_period op
+    ON su.person_id  = op.person_id
+ WHERE DATEADD(d,180,op.observation_period_start_date) < su.index_date
+   AND op.observation_period_end_date                  > DATEADD(d,365,su.index_date)
+ GROUP BY FLOOR(1.0*DATEDIFF(d,su.index_date,op.observation_period_end_date)/365)
+ ORDER BY 1;"
+DEX16 Adherence/compliance - what is adherence rate for given drug?,"WITH finasteride_users AS (
+SELECT de.person_id, de.days_supply, de.drug_exposure_start_date, c.concept_name
+  FROM cdm.drug_exposure de
+  JOIN cdm.concept_ancestor ca
+    ON ca.descendant_concept_id = de.drug_concept_id
+  JOIN cdm.concept c
+    ON c.concept_id = ca.ancestor_concept_id
+ WHERE LOWER(c.concept_class_id) = 'ingredient'
+   AND ca.ancestor_concept_id = 996416
+), era_data AS (
+SELECT de.person_id,
+       de.drug_concept_id AS ingredient_concept_id,
+       fu.concept_name,
+       de.drug_era_start_date,
+       de.drug_era_end_date,
+       DATEDIFF(d,de.drug_era_start_date,de.drug_era_end_date) AS treatment_length,
+       fu.drug_exposure_start_date,
+       fu.days_supply,
+       SIGN(ISNULL(fu.days_supply,0)) has_days_supply
+  FROM cdm.drug_era de
+  JOIN finasteride_users fu
+    ON de.person_id = fu.person_id
+   AND fu.drug_exposure_start_date >= de.drug_era_start_date
+   AND fu.drug_exposure_start_date <= de.drug_era_end_date
+ WHERE de.drug_concept_id = 996416
+   AND SIGN(ISNULL(fu.days_supply,0)) > 0
+   AND DATEDIFF(d,de.drug_era_start_date,de.drug_era_end_date) > 100   
+)
+SELECT concept_name          AS drug_name,
+       COUNT(*)              AS number_of_eras,
+       AVG(treatment_length) AS average_treatment_length_count,
+       AVG(adherence)        AS avgerage_adherence_count
+  FROM (
+SELECT person_id,
+       concept_name,
+       drug_era_start_date,
+       SUM(days_supply) AS days_supply,
+       treatment_length,
+       1.0*SUM(days_supply)/treatment_length AS adherence,
+       MIN(has_days_supply) AS has_days_supply    
+  FROM era_data
+ GROUP BY person_id,concept_name,drug_era_start_date,treatment_length
+       ) TMP
+ GROUP BY concept_name;"
+DEX17 Why do people stop treatment?,"SELECT stop_reason, COUNT(*) AS reason_freq
+  FROM cdm.drug_exposure
+ WHERE stop_reason IS NOT null
+ GROUP BY stop_reason
+ ORDER BY reason_freq DESC;"
+DEX18 What is the distribution of DRUG TYPE CONCEPT ID (modes of distribution) for a given drug?,"SELECT c.concept_name AS drug_type, COUNT(*) AS drug_type_count
+  FROM cdm.drug_exposure de
+  JOIN cdm.concept c
+    ON c.concept_id = de.drug_type_concept_id
+ GROUP BY c.concept_name
+ ORDER BY drug_type_count DESC;"
+DEX19 How many people are taking a drug for a given indication?,"/* indication and associated drug ids */
+SELECT c1.concept_name AS indication, COUNT(DISTINCT de.person_id) AS count_value
+  FROM cdm.concept c1
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c1.concept_id
+  JOIN cdm.drug_exposure de
+    ON ca.descendant_concept_id = de.drug_concept_id
+  JOIN cdm.concept c2
+    ON de.drug_concept_id  = c2.concept_id
+ WHERE c1.concept_name     = 'Tuberculosis'   
+   AND c1.concept_class_id = 'Ind / CI'
+   AND c2.domain_id        = 'Drug'
+   AND c2.vocabulary_id    = 'RxNorm'
+   AND c2.standard_concept = 'S'
+ GROUP BY c1.concept_name;  "
+DEX20 How many people taking a drug for a given indicaton actually have that disease in their record prior to exposure?,"WITH tb_treatment_start AS (
+/* person and tuberculosis treatment start date */
+SELECT de.person_id, MIN(de.drug_exposure_start_date) AS treatment_start
+  FROM cdm.concept c1
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c1.concept_id
+  JOIN cdm.drug_exposure de
+    ON ca.descendant_concept_id = de.drug_concept_id
+  JOIN cdm.concept c2
+    ON de.drug_concept_id  = c2.concept_id
+ WHERE c1.concept_name     = 'Tuberculosis'   
+   AND c1.concept_class_id = 'Ind / CI'
+   AND c2.domain_id        = 'Drug'
+   AND c2.vocabulary_id    = 'RxNorm'
+   AND c2.standard_concept = 'S'
+ GROUP BY de.person_id
+), tb_first_diagnosis AS (
+SELECT co.person_id, MIN(co.condition_start_date) AS first_diagnosis  
+  FROM cdm.concept c
+  JOIN cdm.concept_ancestor ca
+    ON ca.ancestor_concept_id = c.concept_id
+  JOIN cdm.condition_occurrence co
+    ON co.condition_concept_id = ca.descendant_concept_id  
+ WHERE c.concept_name = 'Tuberculosis'
+ GROUP BY co.person_id
+)
+SELECT COUNT(*) AS treated
+  FROM tb_treatment_start tss
+  JOIN tb_first_diagnosis tfd
+    ON tss.person_id = tfd.person_id
+   AND tss.treatment_start >= tfd.first_diagnosis;"
+DEX21 How many people have a diagnosis of a contraindication for the drug they are taking?,"WITH con_rel AS (
+SELECT r1.concept_id_1,
+       r2.concept_id_2
+  FROM cdm.concept_relationship AS r1
+  JOIN cdm.concept_relationship r2
+    ON r2.concept_id_1    = r1.concept_id_2
+ WHERE r1.relationship_id = 'Has CI'
+   AND r2.relationship_id = 'Ind/CI - SNOMED'
+)
+SELECT COUNT(DISTINCT d.person_id) AS count_value
+  FROM con_rel cr
+  JOIN cdm.drug_exposure d
+    ON cr.concept_id_1 = d.drug_concept_id
+  JOIN cdm.condition_occurrence c
+    ON cr.concept_id_2  = c.condition_concept_id
+   AND d.person_id      = c.person_id
+ WHERE d.drug_exposure_start_date >= c.condition_start_date"
+DEX22 How many poeple take a drug in a given class?,"SELECT COUNT(DISTINCT d.person_id) AS person_count
+  FROM cdm.concept_ancestor ca
+  JOIN cdm.drug_exposure d
+    ON d.drug_concept_id = ca.descendant_concept_id
+ WHERE ca.ancestor_concept_id = 4324992
+ GROUP BY ca.ancestor_concept_id;"
+DEX23 Distribution of days supply,"WITH days_supply_freq AS (
+SELECT days_supply, COUNT(*) AS num_occurrences
+  FROM cdm.drug_exposure
+ WHERE days_supply > 0
+   AND YEAR(drug_exposure_start_date)  = 2008
+   AND MONTH(drug_exposure_start_date) = 1
+ GROUP BY days_supply
+), ordered_data AS (
+SELECT days_supply, num_occurrences,
+       ROW_NUMBER()OVER(ORDER BY num_occurrences) order_nr,
+       COUNT(*)OVER() population_size,
+       MIN(days_supply)OVER() AS min_value,
+       MAX(days_supply)OVER() AS max_value,
+       ROUND(AVG(1.0*days_supply)OVER(),0) AS avg_value,    
+       ROUND(STDEV(days_supply)OVER(),0)   AS stdev_value
+  FROM days_supply_freq
+)
+SELECT min_value,max_value,avg_value,stdev_value,
+       MAX(CASE WHEN order_nr = CEILING(population_size *.25) THEN days_supply END) AS pct_25,
+       MAX(CASE WHEN order_nr = CEILING(population_size *.50) THEN days_supply END) AS median,
+       MAX(CASE WHEN order_nr = CEILING(population_size *.75) THEN days_supply END) AS pct_75
+  FROM ordered_data
+ GROUP BY min_value,max_value,avg_value,stdev_value;"
+DEX24 Counts of days supply,"SELECT days_supply, COUNT(*) AS cnt
+  FROM cdm.drug_exposure
+ GROUP BY days_supply
+ ORDER BY days_supply;"
+DEX25 Counts of drug records,"SELECT COUNT(*) as exposure_occurrence_count  
+  FROM cdm.drug_exposure
+ WHERE drug_concept_id IN (906805, 1517070, 19010522);"
+DEX26 Distribution of drug exposure end dates,"WITH dexp_end_dates AS
+( SELECT
+    DATEDIFF(d,(SELECT MIN(drug_exposure_end_date) FROM cdm.drug_exposure), drug_exposure_end_date) AS end_date_num,
+    drug_exposure_end_date                                                                           AS end_date,
+    (SELECT MIN(drug_exposure_end_date) FROM cdm.drug_exposure)                                     AS min_date
+  FROM cdm.drug_exposure
+)
+SELECT
+  min(end_date)                                                                                             AS min_date,
+  max(end_date)                                                                                             AS max_date,
+  dateadd(dd, avg(CAST(end_date_num AS BIGINT)), min_date)                                                                  AS avg_date,
+  round(STDEV(end_date_num), 0)                                                                             AS stdev_days,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .25 * population_size THEN 999999 ELSE end_date_num END), min_date) AS percentile_25_date,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .50 * population_size THEN 999999 ELSE end_date_num END), min_date) AS median_date,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .75 * population_size THEN 999999 ELSE end_date_num END), min_date) AS percentile_75_date
+FROM
+ ( SELECT
+    end_date_num,                                                              
+    end_date,
+    min_date,
+    ROW_NUMBER() OVER ( ORDER BY end_date_num)      AS  order_nr,
+    (SELECT COUNT(*) FROM dexp_end_dates)           AS population_size
+  FROM dexp_end_dates
+) AS ordered_data
+GROUP BY min_date;"
+DEX27 Distribution of drug exposure start dates,"WITH dexp_start_dates AS
+( SELECT
+    DATEDIFF(d,(SELECT MIN(drug_exposure_start_date) FROM cdm.drug_exposure), drug_exposure_start_date) AS start_date_num,
+    drug_exposure_start_date                                                                             AS start_date,
+    (SELECT MIN(drug_exposure_start_date) FROM cdm.drug_exposure)                                       AS min_date
+  FROM cdm.drug_exposure
+)
+SELECT
+  min(start_date)                                                                                             AS min_date,
+  max(start_date)                                                                                             AS max_date,
+  dateadd(dd, avg(CAST(start_date_num AS BIGINT)), min_date)                                                                  AS avg_date,
+  round(STDEV(start_date_num), 0)                                                                             AS stdev_days,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .25 * population_size THEN 99999999 ELSE start_date_num END), min_date) AS percentile_25_date,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .50 * population_size THEN 99999999 ELSE start_date_num END), min_date) AS median_date,
+  dateadd(dd,  MIN(CASE WHEN order_nr < .75 * population_size THEN 99999999 ELSE start_date_num END), min_date) AS percentile_75_date
+FROM
+ ( SELECT
+    start_date_num,                                                              
+    start_date,
+    min_date,
+    ROW_NUMBER() OVER ( ORDER BY start_date_num)      AS  order_nr,
+    (SELECT COUNT(*) FROM dexp_start_dates)           AS population_size
+  FROM dexp_start_dates
+) AS ordered_data
+GROUP BY min_date;"
+DEX28 Counts of drug types,"SELECT
+  drug_type_concept_id AS drug_type_concept_id,
+  count(*)             AS exposure_occurrence_count
+FROM cdm.drug_exposure
+WHERE
+  drug_concept_id IN (SELECT DISTINCT drug_concept_id FROM cdm.drug_era)
+  AND drug_type_concept_id IN (38000175, 38000180, 43542356)
+GROUP BY drug_type_concept_id
+;"
+DEX29 Distribution of number of distinct drugs persons take,"SELECT
+    MIN(stat_value)                                                                    AS min_value,
+    MAX(stat_value)                                                                    AS max_value,
+    ROUND(AVG(stat_value), 1)                                                          AS avg_value,
+    ROUND(STDEV(stat_value), 1)                                                        AS STDEV_value,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END)      AS percentile_25,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END)      AS median_value,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END)      AS percentile_75
+
+FROM (
+  SELECT
+    COUNT(DISTINCT drug_concept_id)                                 AS stat_value,
+    ROW_NUMBER() OVER (ORDER BY count(DISTINCT drug_concept_id) )   AS order_nr,
+    (SELECT COUNT(DISTINCT person_id) FROM cdm.drug_exposure )     AS population_size
+  FROM cdm.drug_exposure
+  GROUP BY person_id
+) ordered_data;"
+DEX30 Counts of number of distinct drugs persons take,"SELECT
+  t.person_id,
+  count(DISTINCT t.drug_concept_id) AS n_distinct_drugs
+FROM cdm.drug_exposure t
+GROUP BY t.person_id
+HAVING count(DISTINCT t.drug_concept_id) > 10
+;"
+DEX31 Distribution of drug exposure records per person,"SELECT
+    MIN(stat_value)                                                                    AS min_value,
+    MAX(stat_value)                                                                    AS max_value,
+    ROUND(AVG(stat_value), 1)                                                          AS avg_value,
+    ROUND(STDEV(stat_value), 1)                                                        AS STDEV_value,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END)      AS percentile_25,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END)      AS median_value,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END)      AS percentile_75
+
+FROM (
+  SELECT
+    COUNT(*)                                                        AS stat_value,
+    ROW_NUMBER() OVER (ORDER BY count(*) )                          AS order_nr,
+    (SELECT COUNT(DISTINCT person_id) FROM cdm.drug_exposure )     AS population_size
+  FROM cdm.drug_exposure
+  GROUP BY person_id
+) ordered_data;"
+DEX32 Counts of drug exposure records per person,"SELECT
+  person_id,
+  count(*) AS exposure_count
+FROM cdm.drug_exposure
+GROUP BY person_id
+HAVING count(*) in (3,4)
+;"
+DEX33 Counts of drug exposure records stratified by observation month,"SELECT
+  MONTH(drug_exposure_start_date) AS month_num,
+  COUNT(*) AS                       exp_in_month_count
+FROM cdm.drug_exposure
+WHERE MONTH(drug_exposure_start_date) IN (3, 5)
+GROUP BY MONTH(drug_exposure_start_date)
+ORDER BY month_num
+;"
+DEX34 Distribution of drug quantity,"SELECT
+    MIN(stat_value)                                                                    AS min_value,
+    MAX(stat_value)                                                                    AS max_value,
+    AVG(stat_value)                                                                    AS avg_value,
+    ROUND(STDEV(stat_value), 1)                                                        AS STDEV_value,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END)      AS percentile_25,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END)      AS median_value,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END)      AS percentile_75
+
+FROM (
+  SELECT
+    quantity                                                     AS stat_value,
+    ROW_NUMBER() OVER (ORDER BY quantity)                        AS order_nr,
+    (SELECT COUNT(*) FROM cdm.drug_exposure WHERE quantity > 0) AS population_size
+  FROM cdm.drug_exposure
+  -- Retrieve only positive quantities
+  WHERE quantity > 0
+) ordered_data;"
+DEX35 Counts of drug quantity,"SELECT
+  COUNT(1) AS drug_quantity_count,
+  quantity
+FROM cdm.drug_exposure
+-- List of input numbers
+WHERE quantity in (10, 20)
+GROUP BY quantity;"
+DEX36 Distribution of drug refills,"SELECT
+    MIN(stat_value)                                                                    AS min_value,
+    MAX(stat_value)                                                                    AS max_value,
+    AVG(stat_value)                                                                    AS avg_value,
+    ROUND(STDEV(stat_value), 1)                                                        AS STDEV_value,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE stat_value END)      AS percentile_25,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE stat_value END)      AS median_value,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE stat_value END)      AS percentile_75
+
+FROM (
+  SELECT
+    refills                                                     AS stat_value,
+    ROW_NUMBER() OVER (ORDER BY refills)                        AS order_nr,
+    (SELECT COUNT(*) FROM cdm.drug_exposure WHERE refills > 0) AS population_size
+  FROM cdm.drug_exposure
+  -- Retrieve only positive quantities
+  WHERE refills > 0
+) ordered_data;"
+DEX37 Counts of drug refills,"SELECT
+  COUNT(1)  AS drug_exposure_count,
+  refills   AS refills_count
+FROM cdm.drug_exposure
+-- Filter by input list of refills
+WHERE refills in (10, 20)
+GROUP BY refills;"
+DEX38 Counts of stop reasons,"SELECT
+  COUNT(1) AS totExp,
+  stop_reason
+FROM cdm.drug_exposure
+-- Filter by input list of stop reasons
+WHERE stop_reason IN ('INVALID')
+GROUP BY stop_reason;"
+"DEX39 Counts of drugs, stratified by drug type","SELECT
+  drug_concept_id,
+  drug_type_concept_id,
+  COUNT(1) AS drugs_count
+FROM cdm.drug_exposure
+      -- Filter by input list of drug_concept_id
+WHERE drug_concept_id IN (906805, 1517070, 19010522)
+      -- Filter by input list of drug_type_concept_id
+      AND drug_type_concept_id IN (38000175,38000179)
+GROUP BY drug_type_concept_id, drug_concept_id;"
+"DEX40 Counts of drugs, stratified by relevant condition","SELECT
+  drug_concept_id,
+  condition_concept_id  AS relevant_condition_concept_id,
+  COUNT(1)              AS drugs_count
+FROM cdm.drug_exposure
+INNER JOIN cdm.condition_occurrence
+ON drug_exposure.visit_occurrence_id = condition_occurrence.visit_occurrence_id
+   AND       drug_exposure.person_id = condition_occurrence.person_id
+      -- Filter by input drug_concept_id
+WHERE drug_concept_id in (906805, 1517070, 19010522)
+      -- filter by input condition_concept_id
+      AND condition_concept_id in (26052, 258375)
+GROUP BY condition_concept_id, drug_concept_id;"
+"DEX41 Distribution of drug exposure start date, stratified by drug","WITH drug_dates AS
+  (
+    SELECT
+        DATEDIFF(d,MIN(drug_exposure_start_date) OVER(partition BY drug_concept_id), drug_exposure_end_date) AS start_date_num,
+        drug_exposure_start_date                                                                             AS start_date,
+        MIN(drug_exposure_start_date) OVER(partition BY drug_concept_id)                                     AS min_date,
+        drug_concept_id                                                                                      AS drug_concept_id
+    FROM cdm.drug_exposure
+    WHERE drug_concept_id IN (906805, 1517070, 19010522, 19031397)
+  )
+SELECT
+  ordered_data.drug_concept_id,
+  min(start_date)                                                                                AS min_date,
+  max(start_date)                                                                                AS max_date,
+  DATEADD(dd,avg(start_date_num),min_date)                                                       AS avg_date,
+  round(STDEV(start_date_num), 1)                                                                AS STDEV_days,
+  dateadd(day,MIN(CASE WHEN order_nr < .25 * population_size THEN 999999 ELSE start_date_num END),min_date) AS percentile_25_date,
+  dateadd(day,MIN(CASE WHEN order_nr < .50 * population_size THEN 999999 ELSE start_date_num END),min_date) AS median_date,
+  dateadd(day,MIN(CASE WHEN order_nr < .75 * population_size THEN 999999 ELSE start_date_num END),min_date) AS percentile_75_date
+FROM
+ ( SELECT
+    drug_concept_id                                                               AS drug_concept_id,
+    min_date,
+    start_date,
+    start_date_num                                                                AS start_date_num,
+    ROW_NUMBER() OVER (PARTITION BY drug_concept_id ORDER BY start_date_num)      AS  order_nr
+  FROM drug_dates
+) AS ordered_data
+INNER JOIN
+ ( SELECT drug_concept_id,
+    COUNT(*) AS population_size
+   FROM drug_dates
+   GROUP BY drug_concept_id
+) AS population_sizes
+ ON ordered_data.drug_concept_id = population_sizes.drug_concept_id
+GROUP BY ordered_data.drug_concept_id, min_date;"
+"DEX42 Counts of genders, stratified by drug","SELECT
+  gender_concept_id,
+  drug_concept_id,
+  COUNT(1) AS gender_count
+FROM cdm.drug_exposure
+INNER JOIN cdm.person
+ON drug_exposure.person_id = person.person_id
+      -- Filter by input list of drug_concept_id
+WHERE drug_concept_id IN (906805, 1517070, 19010522)
+      -- Filter by input list of gender_concept_id  
+      AND gender_concept_id IN (8507, 8532)
+GROUP BY drug_concept_id, gender_concept_id
+ORDER BY drug_concept_id, gender_concept_id;"
+"DEX43 Counts of drug exposure records per person, stratified by drug","SELECT
+  drug_concept_id,
+  person_id,
+  COUNT(1) AS drug_exposure_count
+FROM cdm.drug_exposure
+      -- Filter by input list of drug_concept_id
+WHERE drug_concept_id in (906805, 1517070, 19010522)
+GROUP BY person_id, drug_concept_id
+ORDER BY drug_concept_id, person_id;"
+D01 Find drug concept by concept ID,"SELECT 
+    c.concept_id AS drug_concept_id,
+    c.concept_name AS drug_concept_name,
+    c.concept_code AS drug_concept_code,
+    c.concept_class_id AS drug_concept_class,
+    c.standard_concept AS drug_standard_concept,
+    c.vocabulary_id AS drug_concept_vocab_id,
+    (CASE c.domain_id WHEN 'Drug' THEN 'Yes' ELSE 'No' END) AS is_drug_concept_flag
+FROM cdm.concept AS c
+WHERE getdate() >= c.valid_start_date AND getdate() <= c.valid_end_date 
+  AND c.concept_id = 1545999
+;"
+D02 Find drug or class by keyword,"SELECT c.concept_id Entity_Concept_Id, c.concept_name Entity_Name, c.concept_code Entity_Code, 'Concept' Entity_Type, c.concept_class_id Entity_concept_class_id, c.vocabulary_id Entity_vocabulary_id
+FROM cdm.concept c
+WHERE c.concept_class_id IS NOT NULL
+AND c.vocabulary_id in ('NDFRT','RxNorm','Indication','ETC','ATC','VA Class','GCN_SEQNO')
+AND LOWER(REPLACE(REPLACE(c.concept_name, ' ', ''), '-', '')) LIKE 'lipitor'
+AND getdate() >= c.valid_start_date
+AND getdate() <= c.valid_end_date
+
+UNION ALL
+
+SELECT c.concept_id Entity_Concept_Id, c.concept_name Entity_Name, c.concept_code Entity_Code, 'Mapped Code' Entity_Type,
+c.concept_class_id Entity_concept_class_id, c.vocabulary_id Entity_vocabulary_id
+FROM cdm.concept_relationship cr JOIN cdm.concept c ON c.concept_id = cr.concept_id_1
+AND cr.relationship_id = 'Maps to'
+AND c.vocabulary_id IN ('NDC', 'GPI', 'Multum', 'Multilex', 'VA Product', 'MeSH', 'SPL')
+AND LOWER(REPLACE(REPLACE(c.concept_name, ' ', ''), '-', '')) LIKE 'lipitor'
+AND getdate() >= c.valid_start_date
+AND getdate() <= c.valid_end_date
+
+UNION ALL
+
+SELECT c.concept_id Entity_Concept_Id, s.concept_synonym_name Entity_Name, c.concept_code Entity_Code, 'Concept Synonym' Entity_Type, c.concept_class_id Entity_concept_class_id, c.vocabulary_id Entity_vocabulary_id
+FROM cdm.concept c, cdm.concept_synonym s
+WHERE S.concept_id = c.concept_id
+AND c.vocabulary_id in ('NDFRT','RxNorm','Indication','ETC','ATC','VA Class','GCN_SEQNO')
+AND c.concept_class_id IS NOT NULL
+AND LOWER(REPLACE(REPLACE(s.concept_synonym_name, ' ', ''), '-', '')) LIKE 'lipitor'
+AND getdate() >= c.valid_start_date
+AND getdate() <= c.valid_end_date;"
+D03 Find ingredients of a drug,"SELECT
+        D.Concept_Id drug_concept_id,
+        D.Concept_Name drug_name,
+        D.Concept_Code drug_concept_code,
+        D.Concept_Class_id drug_concept_class,
+        A.Concept_Id ingredient_concept_id,
+        A.Concept_Name ingredient_name,
+        A.Concept_Code ingredient_concept_code,
+        A.Concept_Class_id ingredient_concept_class
+FROM
+        cdm.concept_ancestor CA,
+        cdm.concept A,
+        cdm.concept D
+WHERE
+        CA.descendant_concept_id = D.concept_id
+        AND CA.ancestor_concept_id = A.concept_id
+        AND LOWER(A.concept_class_id) = 'ingredient'
+        AND getdate() >= A.VALID_START_DATE
+        AND getdate() <= A.VALID_END_DATE
+        AND getdate() >= D.VALID_START_DATE
+        AND getdate() <= D.VALID_END_DATE
+        AND CA.descendant_concept_id IN (939355, 19102189, 19033566)"
+D04 Find drugs by ingredient,"SELECT
+        A.concept_id Ingredient_concept_id,
+        A.concept_Name Ingredient_name,
+        A.concept_Code Ingredient_concept_code,
+        A.concept_Class_id Ingredient_concept_class,
+        D.concept_id Drug_concept_id,
+        D.concept_Name Drug_name,
+        D.concept_Code Drug_concept_code,
+        D.concept_Class_id Drug_concept_class
+FROM
+        cdm.concept_ancestor CA,
+        cdm.concept A,
+        cdm.concept D
+WHERE
+        CA.ancestor_concept_id = A.concept_id
+        AND CA.descendant_concept_id = D.concept_id
+        AND getdate() >= A.valid_start_date
+        AND getdate() <= A.valid_end_date
+        AND getdate() >= D.valid_start_date
+        AND getdate() <= D.valid_end_date
+        AND CA.ancestor_concept_id = 966991;"
+D05 Find generic drugs by ingredient,"SELECT        A.concept_id Ingredient_concept_id,
+                A.concept_Name Ingredient_name,
+                A.concept_Code Ingredient_concept_code,
+                A.concept_Class_id Ingredient_concept_class,
+                D.concept_id Generic_concept_id,
+                D.concept_Name Generic_name,
+                D.concept_Code Generic_concept_code,
+                D.concept_class_id Generic_concept_class
+FROM        cdm.concept_ancestor CA,
+                cdm.concept A,
+                cdm.concept D
+WHERE
+        CA.ancestor_concept_id = 966991
+AND        CA.ancestor_concept_id = A.concept_id
+AND CA.descendant_concept_id = D.concept_id
+AND        D.concept_class_id = 'Clinical Drug'
+AND        (getdate() >= A.valid_start_date)
+AND        (getdate() <= A.valid_end_date)
+AND          (getdate() >= D.valid_start_date)
+AND        (getdate() <= D.valid_end_date)"
+D06 Find branded drugs by ingredient,"SELECT        A.concept_id Ingredient_concept_id,
+                A.concept_name Ingredient_concept_name,
+                A.concept_code Ingredient_concept_code,
+                A.concept_class_id Ingredient_concept_class,
+                D.concept_id branded_drug_id,
+                D.concept_name branded_drug_name,
+                D.concept_code branded_drug_concept_code,
+                D.concept_class_id branded_drug_concept_class
+FROM        cdm.concept_ancestor CA,
+                cdm.concept A,
+                cdm.concept D
+WHERE
+        CA.ancestor_concept_id = 966991
+AND        CA.ancestor_concept_id = A.concept_id
+AND        CA.descendant_concept_id = D.concept_id
+AND        D.concept_class_id = 'Branded Drug'
+AND        (getdate() >= A.valid_start_date)
+AND        (getdate() <= A.valid_end_date)
+AND        (getdate() >= D.valid_start_date)
+AND        (getdate() <= D.valid_end_date)"
+D07 Find single ingredient drugs by ingredient,"SELECT
+      c.concept_id       AS drug_concept_id,
+      c.concept_name     AS drug_concept_name,
+      c.concept_class_id AS drug_concept_class_id
+FROM cdm.concept c
+INNER JOIN (
+  SELECT drug.cid FROM (
+    SELECT a.descendant_concept_id cid, count(*) cnt FROM cdm.concept_ancestor a
+    INNER JOIN (
+      SELECT c.concept_id FROM cdm.concept c, cdm.concept_ancestor a
+      WHERE a.ancestor_concept_id = 1000560
+      AND a.descendant_concept_id = c.concept_id AND c.domain_id = 'Drug'
+    ) cd ON cd.concept_id = a.descendant_concept_id
+    INNER JOIN cdm.concept c ON c.concept_id=a.ancestor_concept_id
+        WHERE c.concept_class_id = 'Ingredient'
+    GROUP BY a.descendant_concept_id
+  ) drug WHERE drug.cnt = 1  -- contains only 1 ingredient
+) onesie ON onesie.cid = c.concept_id
+WHERE (getdate() >= valid_start_date) AND (getdate() <= valid_end_date)
+;"
+D08 Find drug classes for a drug or ingredient,"SELECT
+ c1.concept_id                 Class_Concept_Id,
+ c1.concept_name               Class_Name,
+ c1.concept_code               Class_Code,
+ c1.concept_class_id              Classification,
+ c1.vocabulary_id              Class_vocabulary_id,
+ v1.vocabulary_name            Class_vocabulary_name,
+ ca.min_levels_of_separation  Levels_of_Separation
+FROM cdm.concept_ancestor   ca,
+ cdm.concept                c1,
+ cdm.vocabulary             v1
+WHERE
+ca.ancestor_concept_id = c1.concept_id
+AND    c1.vocabulary_id IN ('NDFRT', 'ETC', 'ATC', 'VA Class')
+AND    c1.concept_class_id IN ('ATC','VA Class','Mechanism of Action','Chemical Structure','ETC','Physiologic Effect')
+AND    c1.vocabulary_id = v1.vocabulary_id
+AND    ca.descendant_concept_id = 1545999
+AND    (getdate() >= c1.valid_start_date) AND (getdate() <= c1.valid_end_date);"
+D09 Find drugs by drug class,"SELECT  c.concept_id       AS drug_concept_id,
+        c.concept_name     AS drug_concept_name,
+        c.concept_class_id AS drug_concept_class,
+        c.concept_code     AS drug_concept_code
+FROM cdm.concept AS c
+  JOIN cdm.concept_ancestor AS ca
+    ON c.concept_id = ca.descendant_concept_id
+WHERE ca.ancestor_concept_id = 21506108
+      AND c.domain_id = 'Drug'
+      AND c.standard_concept = 'S'
+      AND getdate() >= c.valid_start_date
+      AND getdate() <= c.valid_end_date"
+D10 Find ingredient by drug class,"SELECT  c.concept_id    ingredient_concept_id,
+        c.concept_name  ingredient_concept_name,
+        c.concept_class_id ingredient_concept_class,
+        c.concept_code  ingredient_concept_code
+ FROM   cdm.concept          c,
+        cdm.concept_ancestor ca
+ WHERE  ca.ancestor_concept_id = 21506108
+   AND  c.concept_id           = ca.descendant_concept_id
+   AND  c.vocabulary_id        = 'RxNorm'
+   AND  c.concept_class_id     = 'Ingredient'
+   AND  (getdate() >= c.valid_start_date)
+   AND  (getdate() <= c.valid_end_date);"
+D11 Find source codes by drug class,"SELECT  d.concept_code,
+        d.vocabulary_id,
+        v.vocabulary_name
+ FROM cdm.concept_ancestor ca
+        JOIN cdm.concept d on d.concept_id = ca.descendant_concept_id
+        JOIN cdm.concept a on a.concept_id = ca.ancestor_concept_id
+        JOIN cdm.vocabulary v on d.vocabulary_id = v.vocabulary_id
+ WHERE  ca.ancestor_concept_id = 21506108
+   AND  a.vocabulary_id = 'NDC'
+   AND  d.domain_id = 'Drug'
+   AND  (getdate() >= d.valid_start_date)
+   AND  (getdate() <= d.valid_end_date);"
+D14 Find drugs for an indication,"SELECT drug.concept_id   AS drug_concept_id,
+       drug.concept_name AS drug_concept_name,
+       drug.concept_code AS drug_concept_code
+FROM cdm.concept AS drug
+  JOIN cdm.concept_ancestor AS a
+      ON a.descendant_concept_id = drug.concept_id
+WHERE a.ancestor_concept_id = 1710446
+  AND drug.standard_concept = 'S'
+  AND drug.domain_id = 'Drug'
+  AND getdate() >= drug.valid_start_date 
+  AND getdate() <= drug.valid_end_date
+;"
+D15 Find drugs for an indication provided as condition concepts,"SELECT DISTINCT
+  drug.concept_id as drug_concept_id,
+  drug.concept_name as drug_concept_name,
+  drug.concept_code as drug_concept_code
+FROM
+  cdm.concept drug,
+  cdm.concept_ancestor snomed,
+  cdm.concept_ancestor ind,
+  cdm.concept_relationship r
+WHERE
+  snomed.ancestor_concept_id = 253954 AND
+  snomed.descendant_concept_id = r.concept_id_1 AND
+  concept_id_2 = ind.ancestor_concept_id AND
+  -- r.relationship_id in (247, 248) AND
+  --r.relationship_id in ('Ind/CI - SNOMED', 'SNOMED - ind/CI') AND
+  ind.descendant_concept_id = drug.concept_id AND
+  --drug.concept_level = 1 AND
+  --drug.vocabulary_id = 'RxNorm' AND
+  (getdate() >= drug.valid_start_date) AND (getdate() <= drug.valid_end_date);"
+D16 Find drugs for an indication by indication type,"SELECT DISTINCT
+ drug.concept_id      as drug_concept_id,
+ drug.concept_name    as drug_concept_name,
+ drug.concept_code    as drug_concept_code,
+ rn.relationship_name as indication_type,
+ indication_relation.relationship_id
+FROM
+  cdm.concept_relationship indication_relation
+INNER JOIN cdm.concept_ancestor a
+ ON a.ancestor_concept_id=indication_relation.concept_id_2
+INNER JOIN cdm.concept drug
+ ON drug.concept_id=a.descendant_concept_id
+INNER JOIN cdm.relationship rn
+ ON rn.relationship_id=indication_relation.relationship_id
+WHERE indication_relation.concept_id_1 = 4345991
+  AND drug.domain_id = 'Drug'
+  AND drug.standard_concept = 'S'
+  AND indication_relation.relationship_id in (
+          'May treat',
+        'Is off-label ind of',
+        'Is FDA-appr ind of',
+        'Inferred class of',
+        'May be prevented by',
+        'May prevent',
+        'Has FDA-appr ind',
+        'Has off-label ind',
+        'May be treated by',
+        'Has inferred class')
+  AND (getdate() >= drug.valid_start_date) AND (getdate() <= drug.valid_end_date);"
+D17 Find ingredients for an indication,"SELECT
+  ingredient.concept_id   AS ingredient_concept_id,
+  ingredient.concept_name AS ingredient_concept_name,
+  ingredient.concept_code AS ingredient_concept_code
+FROM cdm.concept AS ingredient
+  JOIN cdm.concept_ancestor AS a
+    on a.descendant_concept_id = ingredient.concept_id
+WHERE
+  a.ancestor_concept_id = 4345991 AND
+  ingredient.domain_id = 'Drug' AND
+  ingredient.standard_concept = 'S' AND
+  (getdate() >= ingredient.valid_start_date) AND (getdate() <= ingredient.valid_end_date)
+;"
+D18 Find ingredients for an indication provided as condition concept,"SELECT DISTINCT
+  ingredient.concept_id as ingredient_concept_id,
+  ingredient.concept_name as ingredient_concept_name,
+  ingredient.concept_code as ingredient_concept_code
+FROM
+  cdm.concept ingredient,
+  cdm.concept_ancestor snomed,
+  cdm.concept_ancestor ind,
+  cdm.concept_relationship r
+WHERE
+  snomed.ancestor_concept_id = 253954 AND
+  snomed.descendant_concept_id = r.concept_id_1 AND
+  concept_id_2 = ind.ancestor_concept_id AND
+  -- r.relationship_id in (247, 248) AND
+  --r.relationship_id in (
+  --     'Ind/CI - SNOMED',
+  --     'SNOMED - ind/CI') AND
+  ind.descendant_concept_id = ingredient.concept_id AND
+  --ingredient.concept_level = 2 AND
+  --ingredient.vocabulary_id = 'RxNorm' AND
+  (getdate() >= ingredient.valid_start_date) AND (getdate() <= ingredient.valid_end_date);"
+D19 Find ingredients for an indication by indication type,"SELECT DISTINCT
+  ingredient.concept_id as ingredient_concept_id,
+  ingredient.concept_name as ingredient_concept_name,
+  ingredient.concept_code as ingredient_concept_code,
+  rn.relationship_name as indication_type,
+  indication_relation.relationship_id
+FROM
+  cdm.concept_relationship indication_relation
+INNER JOIN
+  cdm.concept_ancestor a ON a.ancestor_concept_id=indication_relation.concept_id_2
+INNER JOIN
+  cdm.concept ingredient ON ingredient.concept_id=a.descendant_concept_id
+INNER JOIN
+  cdm.relationship rn ON rn.relationship_id = indication_relation.relationship_id
+WHERE
+  indication_relation.concept_id_1 = 4345991 AND
+  ingredient.domain_id = 'Drug' AND
+  ingredient.standard_concept = 'S' AND
+  indication_relation.relationship_id IN (
+         'May treat',
+         'May prevent',
+         'May be treated by',
+         'May be prevented by',
+         'Has FDA-appr ind',
+         'Has off-label ind',
+         'Is FDA-appr ind of',
+         'Is off-label ind of',
+         'Inferred class of',
+         'Has inferred class') AND
+  (getdate() >= ingredient.valid_start_date) AND (getdate() <= ingredient.valid_end_date);"
+D20 Find dose form of a drug,"SELECT
+        A.concept_id drug_concept_id,
+         A.concept_name drug_name,
+         A.concept_code drug_concept_code,
+         D.concept_id dose_form_concept_id,
+         D.concept_name dose_form_concept_name,
+         D.concept_code dose_form_concept_code
+FROM
+        cdm.concept_relationship CR,
+         cdm.concept A,
+         cdm.concept D
+WHERE
+        (getdate() >= CR.valid_start_date) AND (getdate() <= CR.valid_end_date)
+        AND CR.concept_id_1 = A.concept_id
+        AND CR.concept_id_2 = D.concept_id
+        AND CR.concept_id_1 = 19060647
+        AND CR.relationship_id = 'RxNorm has dose form'
+        --AND CR.relationship_ID = 4
+        --AND A.concept_class_id ='Clinical Drug'
+        --AND A.vocabulary_id = 'RxNorm'
+        ;"
+D22 Find drugs by class and dose form,"SELECT C.concept_id drug_concept_id,
+C.concept_name drug_concept_name,
+C.concept_code drug_concept_code
+FROM cdm.concept C,
+        cdm.concept_ancestor CA,
+        cdm.concept_relationship CRF,
+        cdm.concept F
+WHERE CA.ancestor_concept_id = 4318008
+        AND C.concept_id = CA.descendant_concept_id
+        AND C.domain_id = 'Drug'
+        AND C.standard_concept = 'S'
+        AND CRF.concept_id_1 = C.concept_id
+        AND CRF.relationship_ID = 'RxNorm has dose form'
+        AND CRF.concept_id_2 = F.concept_id
+        AND CHARINDEX(LOWER(REPLACE(REPLACE(F.concept_name, ' ', ''), '-', '')), LOWER(REPLACE(REPLACE('Nasal spray' , ' ', ''), '-', ''))) > 0
+        AND (getdate() >= CRF.valid_start_date) AND (getdate() <= CRF.valid_end_date)"
+D24 Find the branded drugs in a list of drugs,"SELECT C.concept_id       AS drug_concept_id,
+       C.concept_name     AS drug_name,
+       C.concept_code     AS drug_concept_code,
+       C.concept_class_id AS drug_concept_class,
+       C.standard_concept AS drug_standard_concept,
+       C.vocabulary_id    AS drug_vocabulary_id
+FROM cdm.concept AS C
+WHERE C.domain_id = 'Drug'
+      AND C.concept_id IN (1516830, 19046168)
+      AND C.concept_class_id = 'Branded Drug'
+      AND (getdate() >= C.valid_start_date) AND (getdate() <= C.valid_end_date)"
+D25 Find the generic drugs in a list of drugs,"SELECT C.concept_id       AS drug_concept_id,
+       C.concept_name     AS drug_name,
+       C.concept_code     AS drug_concept_code,
+       C.concept_class_id AS drug_concept_class,
+       C.standard_concept AS drug_standard_concept,
+       C.vocabulary_id    AS drug_vocabulary_id
+FROM cdm.concept AS C
+WHERE C.domain_id = 'Drug'
+      AND C.concept_id IN (1396833, 19060643)
+      AND C.concept_class_id = 'Clinical Drug'
+      AND (getdate() >= C.valid_start_date) AND (getdate() <= C.valid_end_date)"
+D26 Find the brand name of a drug,"SELECT A.Concept_Id               drug_concept_id,
+        A.Concept_Name            drug_name,
+        A.Concept_Code            drug_concept_code,
+        A.concept_class_id           drug_concept_class_id,
+        D.Concept_Id              brand_concept_id,
+        D.Concept_Name            brand_name,
+        D.Concept_Code            brand_concept_code,
+        D.concept_class_id           brand_concept_class_id
+FROM   cdm.concept_relationship  CR003,
+       cdm.concept               A,
+       cdm.concept_relationship  CR007,
+       cdm.concept_relationship  CR006,
+       cdm.concept                 D
+WHERE  CR003.relationship_ID  = 'Has tradename'
+AND    CR003.concept_id_1     = A.concept_id
+AND    lower(A.concept_class_id) = 'clinical drug'
+AND    CR007.concept_id_2     = CR003.concept_id_2
+AND    CR007.relationship_ID  = 'Constitutes'
+AND    CR007.concept_id_1     = CR006.concept_id_1
+AND    CR006.relationship_ID  = 'RxNorm has ing'
+AND    CR006.concept_id_2     = D.concept_id
+AND    lower(D.concept_class_id) = 'branded name'
+AND    A.concept_Id           = 939355
+AND    (getdate() >= CR006.VALID_START_DATE) AND (getdate() <= CR006.VALID_END_DATE)
+UNION ALL
+SELECT A.Concept_Id               drug_concept_id,
+       A.Concept_Name             drug_name,
+       A.Concept_Code             drug_concept_code,
+       A.concept_class_id            drug_concept_class_id,
+       D.Concept_Id               brand_concept_id,
+       D.Concept_Name             brand_name,
+       D.Concept_Code             brand_concept_code,
+       D.concept_class_id            brand_concept_class_id
+FROM   cdm.concept               A,
+       cdm.concept_relationship  CR007,
+       cdm.concept_relationship  CR006,
+       cdm.concept               D
+WHERE  lower(A.concept_class_id) = 'branded drug'
+AND    CR007.concept_id_2     = A.concept_id
+AND    CR007.relationship_ID  = 'Constitutes'
+AND    CR007.concept_id_1     = CR006.concept_id_1
+AND    CR006.relationship_ID  = 'RxNorm has ing'
+AND    CR006.concept_id_2     = D.concept_id
+AND    lower(D.concept_class_id) = 'branded name'
+AND    A.concept_Id           = 939355
+AND    (getdate() >= CR006.VALID_START_DATE) AND (getdate() <= CR006.VALID_END_DATE)"
+D27 Find drugs of a brand,"SELECT  A.Concept_Id               drug_concept_id,
+        A.Concept_Name             drug_name,
+        A.Concept_Code             drug_concept_code,
+        A.Concept_Class_id            drug_concept_class,
+        D.Concept_Id               brand_concept_id,
+        D.Concept_Name             brand_name,
+        D.Concept_Code             brand_concept_code,
+        D.Concept_Class_id            brand_concept_class
+FROM   cdm.concept_relationship  CR003,
+       cdm.concept               A,
+       cdm.concept_relationship  CR007,
+       cdm.concept_relationship  CR006,
+       cdm.concept               D
+WHERE  CR003.relationship_ID   = 'Constitutes'
+AND    CR003.concept_id_1      = A.concept_id
+AND     lower(A.concept_class_id) = 'clinical drug'
+AND    CR007.concept_id_2      = CR003.concept_id_2
+AND    CR007.relationship_id   = 'Has tradename'
+AND    CR007.concept_id_1      = CR006.concept_id_1
+AND    CR006.relationship_id   = 'RxNorm has ing'
+AND    CR006.concept_id_2      = D.concept_id
+AND    lower(D.concept_class_id)  = 'brand name'
+AND    D.concept_id            = 19011505
+AND    (getdate() >= CR006.valid_start_date) AND (getdate() <= CR006.valid_end_date)
+AND    (getdate() >= CR007.valid_start_date) AND (getdate() <= CR007.valid_end_date)
+UNION ALL
+SELECT  A.Concept_Id               drug_concept_id,
+        A.Concept_Name             drug_name,
+        A.Concept_Code             drug_concept_code,
+        A.Concept_Class_id            drug_concept_class,
+        D.Concept_Id               brand_concept_id,
+        D.Concept_Name             brand_name,
+        D.Concept_Code             brand_concept_code,
+        D.Concept_Class_id            brand_concept_class
+FROM   cdm.concept              A,
+       cdm.concept_relationship  CR007,
+       cdm.concept_relationship  CR006,
+       cdm.concept               D
+WHERE  lower(A.concept_class_id) = 'branded drug'
+AND    CR007.concept_id_2     = A.concept_id
+AND    CR007.relationship_ID  = 'Has tradename'
+AND    CR007.concept_id_1     = CR006.concept_id_1
+AND    CR006.relationship_ID  = 'RxNorm has ing'
+AND    CR006.concept_id_2     = D.concept_id
+AND    lower(D.concept_class_id) = 'brand name'
+AND    D.concept_id           = 19011505
+AND    (getdate() >= CR006.valid_start_date) AND (getdate() <= CR006.valid_end_date)
+AND    (getdate() >= CR007.valid_start_date) AND (getdate() <= CR007.valid_end_date)"
+G01 Find concept by concept ID,"SELECT
+  c.concept_id,
+  c.concept_name,
+  c.concept_code,
+  c.concept_class_id,
+  c.standard_concept,
+  c.vocabulary_id
+FROM cdm.concept AS c
+WHERE c.concept_id = 192671
+;"
+G02 Find a concept by code from a source vocabulary,"SELECT
+  c.concept_id,
+  c.concept_name,
+  c.concept_code,
+  c.concept_class_id,
+  c.vocabulary_id
+FROM cdm.concept AS c
+WHERE 
+  c.concept_code = '74474003' AND
+  c.vocabulary_id = 'SNOMED' AND
+  c.invalid_reason IS NULL
+;"
+G04 Find synonyms for a given concept,"SELECT
+  c.concept_id,
+  s.concept_synonym_name
+FROM cdm.concept AS c
+  JOIN cdm.concept_synonym AS s ON c.concept_id = s.concept_id
+WHERE c.concept_id = 192671
+;"
+G05 Translate a code from a source to a standard vocabulary,"SELECT DISTINCT
+  c1.domain_id        AS source_domain_id,
+  c2.concept_id       AS concept_id,
+  c2.concept_name     AS concept_name,
+  c2.concept_code     AS concept_code,
+  c2.concept_class_id AS concept_class_id,
+  c2.vocabulary_id    AS concept_vocabulary_id,
+  c2.domain_id        AS concept_domain_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS c1 ON c1.concept_id = cr.concept_id_1
+  JOIN cdm.concept AS c2 ON c2.concept_id = cr.concept_id_2
+WHERE
+  cr.relationship_id = 'Maps to' AND
+  c1.concept_code IN ('070.0') AND
+  c1.vocabulary_id = 'ICD9CM' AND
+  cr.invalid_reason IS NULL
+;"
+G06 Find concepts and their descendants that are covered by a given source code,"WITH dm AS ( -- collect direct maps
+    SELECT
+      c1.concept_code     AS source_code,
+      c1.vocabulary_id    AS source_vocabulary_id,
+      c1.domain_id        AS source_domain_id,
+      c2.concept_id       AS target_concept_id,
+      c2.concept_name     AS target_concept_name,
+      c2.concept_code     AS target_concept_code,
+      c2.concept_class_id AS target_concept_class_id,
+      c2.vocabulary_id    AS target_concept_vocab_id
+    FROM cdm.concept_relationship AS cr
+      JOIN cdm.concept AS c1 ON cr.concept_id_1 = c1.concept_id
+      JOIN cdm.concept AS c2 ON cr.concept_id_2 = c2.concept_id
+    WHERE
+      cr.relationship_id = 'Maps to' AND
+      c1.concept_code IN ('410.0') AND
+      c1.vocabulary_id = 'ICD9CM' AND
+      cr.invalid_reason IS NULL
+)
+SELECT
+  dm.source_code,
+  dm.source_vocabulary_id,
+  dm.source_domain_id,
+  dc.concept_id       AS target_concept_id,
+  dc.concept_name     AS target_concept_name,
+  dc.concept_code     AS target_concept_code,
+  dc.concept_class_id AS target_concept_class_id,
+  dc.vocabulary_id    AS target_concept_vocab_id
+FROM cdm.concept_ancestor AS ca -- collect descendants which includes ancestor itself
+  JOIN dm ON ca.ancestor_concept_id = dm.target_concept_id
+  JOIN cdm.concept AS dc ON ca.descendant_concept_id = dc.concept_id
+WHERE dc.standard_concept = 'S'
+;"
+G07 Find concepts that have a relationship with a given concept,"SELECT
+  'Relates to'         AS relationship_polarity,
+  cr.relationship_id   AS relationship_id,
+  d.concept_id         AS concept_id,
+  d.concept_name       AS concept_name,
+  d.concept_code       AS concept_code,
+  d.concept_class_id   AS concept_class_id,
+  d.vocabulary_id      AS concept_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS a ON cr.concept_id_1 = a.concept_id
+  JOIN cdm.concept AS d ON cr.concept_id_2 = d.concept_id
+WHERE 
+  a.concept_id = 192671 AND
+  cr.invalid_reason IS NULL
+  
+UNION ALL
+
+SELECT
+  'Is related by'      AS relationship_polarity,
+  cr.relationship_id   AS relationship_id,
+  a.concept_id         AS concept_id,
+  a.concept_name       AS concept_name,
+  a.concept_code       AS concept_code,
+  a.concept_class_id   AS concept_class_id,
+  a.vocabulary_id      AS concept_vocab_id
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS a ON cr.concept_id_1 = a.concept_id
+  JOIN cdm.concept AS d ON cr.concept_id_2 = d.concept_id
+WHERE 
+  d.concept_id = 192671 AND
+  cr.invalid_reason IS NULL
+;"
+G08 Find ancestors for a given concept,"SELECT
+  c.concept_id               AS ancestor_concept_id,
+  c.concept_name             AS ancestor_concept_name,
+  c.concept_code             AS ancestor_concept_code,
+  c.concept_class_id         AS ancestor_concept_class_id,
+  c.vocabulary_id            AS vocabulary_id,
+  a.min_levels_of_separation AS min_separation,
+  a.max_levels_of_separation AS max_separation
+FROM cdm.concept_ancestor AS a
+  JOIN cdm.concept AS c ON a.ancestor_concept_id = c.concept_id
+WHERE 
+  a.ancestor_concept_id != a.descendant_concept_id AND 
+  a.descendant_concept_id = 192671 AND
+  c.invalid_reason IS NULL
+ORDER BY vocabulary_id, min_separation
+;"
+G09 Find descendants for a given concept,"SELECT
+  c.concept_id               AS descendant_concept_id,
+  c.concept_name             AS descendant_concept_name,
+  c.concept_code             AS descendant_concept_code,
+  c.concept_class_id         AS descendant_concept_class_id,
+  c.vocabulary_id            AS vocabulary_id,
+  a.min_levels_of_separation AS min_separation,
+  a.max_levels_of_separation AS max_separation
+FROM cdm.concept_ancestor AS a
+  JOIN cdm.concept AS c ON a.descendant_concept_id = c.concept_id
+WHERE 
+  a.ancestor_concept_id != a.descendant_concept_id AND 
+  a.ancestor_concept_id = 192671 AND 
+  c.invalid_reason IS NULL
+ORDER BY vocabulary_id, min_separation
+;"
+G10 Find parents for a given concept,"SELECT
+  a.concept_id       AS parent_concept_id,
+  a.concept_name     AS parent_concept_name,
+  a.concept_code     AS parent_concept_code,
+  a.concept_class_id AS parent_concept_class_id,
+  a.vocabulary_id    AS parent_concept_vocab_id
+FROM cdm.concept_ancestor ca
+  JOIN cdm.concept a ON ca.ancestor_concept_id = a.concept_id
+  JOIN cdm.concept d ON ca.descendant_concept_id = d.concept_id
+WHERE 
+  ca.min_levels_of_separation = 1 AND
+  ca.descendant_concept_id = 192671 AND
+  a.invalid_reason IS NULL
+;"
+G11 Find children for a given concept,"SELECT
+  d.concept_id       AS child_concept_id,
+  d.concept_name     AS child_concept_name,
+  d.concept_code     AS child_concept_code,
+  d.concept_class_id AS child_concept_class_id,
+  d.vocabulary_id    AS child_concept_vocab_id
+FROM cdm.concept_ancestor AS ca
+  JOIN cdm.concept AS d ON ca.descendant_concept_id = d.concept_id
+WHERE
+  ca.min_levels_of_separation = 1 AND
+  ca.ancestor_concept_id = 192671 AND
+  d.invalid_reason IS NULL
+;"
+G12 List current vocabulary release number,"SELECT  
+  vocabulary_version
+FROM cdm.vocabulary
+WHERE vocabulary_id = 'None'
+;"
+G13 List available vocabularies,"SELECT
+  vocabulary_id,
+  vocabulary_name,
+  vocabulary_version
+FROM cdm.vocabulary
+;"
+G14 Statistics about relationships between concepts,"SELECT
+  cr.relationship_id  AS relationship_id,
+  c1.vocabulary_id    AS from_vocabulary_id,
+  c1.concept_class_id AS from_concept_class_id,
+  c2.vocabulary_id    AS to_vocabulary_id,
+  c2.concept_class_id AS to_concept_class_id,
+  COUNT(*)            AS num_records
+FROM cdm.concept_relationship AS cr
+  JOIN cdm.concept AS c1 ON cr.concept_id_1 = c1.concept_id
+  JOIN cdm.concept AS c2 ON cr.concept_id_2 = c2.concept_id
+GROUP BY
+  cr.relationship_id,
+  c1.vocabulary_id,
+  c1.concept_class_id,
+  c2.vocabulary_id,
+  c2.concept_class_id
+ORDER BY
+  cr.relationship_id,
+  c1.concept_class_id
+;"
+"G15 Statistic about Concepts, Vocabularies, Classes and Levels","SELECT
+  vocabulary_id    AS vocabulary_id,
+  concept_class_id AS concept_class_id,
+  standard_concept AS standard_concept,
+  COUNT(*)         AS num_records
+FROM cdm.concept
+GROUP BY
+  vocabulary_id,
+  concept_class_id,
+  standard_concept
+ORDER BY vocabulary_id, concept_class_id, standard_concept
+;"
+G16 Statistics about Condition Mapping of Source Vocabularies,"SELECT
+  mapped.vocabulary_id                                                                                  AS vocabulary_id,
+  CASE mapped.standard_concept
+    WHEN NULL THEN 'Not mapped'
+    ELSE mapped.standard_concept
+  END                                                                                                   AS standard_concept,
+  mapped.mapped_codes                                                                                   AS mapped_codes,
+  sum(mapped.mapped_codes) OVER (PARTITION BY vocabulary_id)                                            AS total_mapped_codes,
+  CAST(mapped.mapped_codes*100/sum(mapped.mapped_codes) OVER (PARTITION BY vocabulary_id) AS varchar)   AS pct_mapped_codes,
+  mapped.mapped_concepts                                                                                AS mapped_concepts,
+  ( SELECT 
+      COUNT(*)
+    FROM cdm.concept
+    WHERE vocabulary_id='SNOMED' AND
+         standard_concept=mapped.standard_concept AND
+         lower(concept_class_id)='clinical finding' AND
+         invalid_reason IS NULL
+  )                                                                                                     AS standard_concepts,
+  CAST(mapped.mapped_concepts*100/
+         ( SELECT CASE COUNT(*) WHEN 0 THEN 1e16 ELSE COUNT(*) END
+                  FROM cdm.concept
+                  WHERE vocabulary_id='SNOMED' AND
+                        standard_concept=mapped.standard_concept AND
+                        lower(concept_class_id)='clinical finding' AND
+                        invalid_reason IS NULL 
+          ) AS VARCHAR)                                                                                 AS pct_mapped_concepts
+FROM 
+  ( SELECT
+        c1.vocabulary_id              AS vocabulary_id,
+        c2.standard_concept           AS standard_concept,
+        COUNT(*)                      AS mapped_codes,
+        COUNT(DISTINCT c2.concept_id) AS mapped_concepts
+    FROM cdm.concept_relationship AS m
+    JOIN cdm.concept AS c1 
+      ON m.concept_id_1=c1.concept_id 
+         AND m.relationship_id='Maps to' 
+         AND m.invalid_reason IS NULL
+    JOIN cdm.concept AS c2 
+      ON c2.concept_id=m.concept_id_2
+    WHERE c2.vocabulary_id='SNOMED' 
+          AND LOWER(c2.domain_id)='condition'
+    GROUP BY c1.vocabulary_id, c2.standard_concept
+  ) AS mapped;"
+G17 Statistics about Drugs Mapping of Source Vocabularies,"SELECT
+  mapped.vocabulary_id                                                                                AS vocabulary_id,
+  mapped.standard_concept                                                                             AS standard_concept,
+  mapped.mapped_codes                                                                                 AS mapped_codes,
+  sum(mapped.mapped_codes) OVER (PARTITION BY vocabulary_id)                                          AS total_mapped_codes,
+  CAST(mapped.mapped_codes*100/sum(mapped.mapped_codes) OVER (PARTITION BY vocabulary_id) AS VARCHAR) AS pct_mapped_codes,
+  mapped.mapped_concepts                                                                              AS mapped_codes,
+  (SELECT 
+    COUNT(*)
+   FROM cdm.concept
+   WHERE vocabulary_id='RxNorm'
+         AND standard_concept=mapped.standard_concept
+         AND invalid_reason IS NULL
+  )                                                                                                   AS standard_concepts,
+  ROUND( mapped.mapped_concepts*100/
+         ( SELECT 
+              CASE COUNT(*) 
+                WHEN 0 THEN 1e16 
+                ELSE COUNT(*) 
+              END
+           FROM cdm.concept
+           WHERE vocabulary_id='RxNorm'
+                 AND standard_concept=mapped.standard_concept
+                 AND invalid_reason IS NULL ) ,1)                                                     AS pct_mapped_concepts
+FROM 
+( SELECT
+    c1.vocabulary_id                    AS vocabulary_id,
+    c2.standard_concept,
+    COUNT(*)                            AS mapped_codes,
+    COUNT(DISTINCT c2.concept_id)       AS mapped_concepts
+  FROM cdm.concept_relationship AS m
+      JOIN cdm.concept AS c1 
+        ON m.concept_id_1=c1.concept_id 
+           AND m.relationship_id='Maps to' 
+           AND m.invalid_reason IS NULL
+      JOIN cdm.concept AS c2 
+        ON c2.concept_id=m.concept_id_2
+  WHERE c2.vocabulary_id IN ('ICD9CM','RxNorm') 
+        AND c2.domain_id='Drug'
+  GROUP BY c1.vocabulary_id, c2.standard_concept
+) AS mapped;"
+OP01 Count number of people who have at least one observation period in the database that is longer than 365 days.,"SELECT COUNT(DISTINCT person_ID) AS NUM_persons
+FROM cdm.observation_period op
+WHERE DATEDIFF(day,op.observation_period_START_DATE,op.observation_period_END_DATE) >= 365;"
+"OP02 Distribution of length of observation, in months, among first observation periods across the population","SELECT
+  FLOOR(DATEDIFF(day, observation_period_start_date, observation_period_end_date)/30) AS num_months,
+  COUNT(DISTINCT person_id) AS num_persons
+FROM
+  ( SELECT
+      person_ID,
+      observation_period_START_DATE,
+      observation_period_END_DATE,
+      rank() OVER (PARTITION BY person_ID ORDER BY observation_period_START_DATE ASC) AS OP_NUMBER
+    FROM cdm.observation_period
+  ) AS OP1
+WHERE op_number = 1
+GROUP BY FLOOR(DATEDIFF(day,observation_period_START_DATE, observation_period_END_DATE)/30)
+ORDER BY FLOOR(DATEDIFF(day,observation_period_START_DATE, observation_period_END_DATE)/30) ASC
+;"
+OP03 Number of people continuously observed throughout a year.,"SELECT
+  COUNT(DISTINCT person_ID) AS num_persons
+FROM cdm.observation_period
+WHERE observation_period_start_date <= '01-jan-2011'
+AND observation_period_end_date >= '31-dec-2011';"
+OP04 Number of people who have gap in observation (two or more observations),"SELECT COUNT_BIG(person_id) AS num_persons
+FROM -- more than one observation period
+  (SELECT
+    person_id
+   FROM cdm.observation_period
+   GROUP BY person_id
+   HAVING COUNT_BIG( person_id ) > 1
+  ) AS t;"
+"OP05 Average length of observation, in month.","SELECT 
+  FLOOR(AVG(DATEDIFF(day, observation_period_start_date, observation_period_end_date)/30)) AS num_months
+FROM cdm.observation_period;"
+"OP06 Average length of observation, in days.","SELECT 
+  AVG(DATEDIFF(day,observation_period_start_date,observation_period_end_date)) AS num_days
+FROM cdm.observation_period;"
+OP07 Distribution of age across all observation period records,"WITH age_distribution AS 
+  ( SELECT 
+      DISTINCT u.person_id, 
+      YEAR(first_observation_date) - year_of_birth AS age
+    FROM -- person, first observation date
+    ( SELECT 
+        person_id,
+        MIN(observation_period_start_date) AS first_observation_date
+      FROM cdm.observation_period
+      GROUP BY person_id
+    ) AS u
+    INNER JOIN cdm.person 
+    ON u.person_id = person.person_id
+    WHERE year_of_birth IS NOT NULL
+  ) 
+SELECT 
+  COUNT(*)                                                                      AS num_people,
+  min( age )                                                                    AS min_age,
+  max( age )                                                                    AS max_age,
+  round( avg( age ), 2 )                                                        AS avg_age,
+  round( STDEV( age ), 1 )                                                      AS stdev_age,
+    ROUND(STDEV(age), 1)                                                        AS STDEV_value,
+    MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE age END)      AS percentile_25,
+    MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE age END)      AS median_age,
+    MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE age END)      AS percentile_75
+
+FROM 
+ ( SELECT 
+     age                                                     AS age,
+     ROW_NUMBER() OVER (ORDER BY age)                        AS order_nr,
+     (SELECT COUNT(*) FROM age_distribution ) AS population_size
+   FROM age_distribution
+ ) ordered_data;"
+OP08 Distribution of observation period records per person,"WITH obser_person AS
+  ( SELECT
+      observation_period.person_id,
+      COUNT(*) AS observation_periods
+    FROM cdm.observation_period
+    INNER JOIN cdm.person 
+    ON observation_period.person_id = person.person_id
+    GROUP BY observation_period.person_id
+  )
+
+SELECT 
+  MIN( observation_periods )                                                              AS min_periods ,
+  MAX( observation_periods )                                                              AS max_periods ,
+  round( avg( observation_periods ), 2 )                                                  AS avg_periods ,
+  round( STDEV( observation_periods ), 1 )                                                AS STDEV_periods ,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE observation_periods END)  AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE observation_periods END)  AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE observation_periods END)  AS percentile_75
+
+FROM 
+ ( SELECT 
+     observation_periods                                                     AS observation_periods,
+     ROW_NUMBER() OVER (ORDER BY observation_periods)                        AS order_nr,
+     (SELECT COUNT(*) FROM obser_person )                                    AS population_size
+   FROM obser_person
+ ) ordered_data;"
+OP09 Observation period records per person,"SELECT p.person_id, count(1) observation_period_count
+FROM cdm.observation_period p
+GROUP BY p.person_id
+having count(1) = 3;"
+OP10 Observation period records stratified by observation month,"WITH table_months AS (
+SELECT top 12 row_number()over(order by person_id) as month from cdm.observation_period
+)
+SELECT
+  month,
+  SUM( observations )                                                     AS num_observations
+FROM
+  ( SELECT
+      month                                                               AS month,
+      min_count +
+        CASE
+          WHEN MONTH >= start_month AND MONTH <= start_month_remainder_check
+            THEN 1
+          WHEN MONTH >= 1 AND MONTH <= start_month + remainder - 12
+            THEN 1
+          ELSE 0
+        END                                                                AS observations
+  -- month | person_id | start_date |  end_date  | min_count | start_month | remainder     
+  FROM table_months
+  CROSS JOIN
+    ( SELECT
+        person_id,
+        start_date,
+        end_date,
+        min_count,
+        start_month,
+        remainder,
+        CASE
+          -- Sign -1 for negative + 1 for postivie NULL for NULL 0 for 0
+          WHEN SIGN(start_month + remainder - 12) = -1 THEN start_month + remainder
+          ELSE 12
+        END                                                                 AS start_month_remainder_check
+
+      FROM
+        ( SELECT
+            person_id,
+            observation_period_start_date                                                                AS start_date,
+            observation_period_end_date                                                                  AS end_date,
+            round(DATEDIFF(day, observation_period_start_date,observation_period_end_date ), 0 )            AS months /* number of complete years */ ,
+            floor(round(DATEDIFF(day, observation_period_start_date,observation_period_end_date)/30,0)/12) AS min_count ,
+            MONTH(observation_period_start_date ) start_month ,
+            -- using n-m*floor(n/m) for n % m, since mod() is not standard on SQL Server and % is not standard on Oracle
+            cast(round(DATEDIFF(day, observation_period_start_date,observation_period_end_date)/30,0) AS integer) - 12*floor(cast(round(DATEDIFF(day, observation_period_start_date,observation_period_end_date)/30,0) AS integer)/12) AS remainder
+          FROM cdm.observation_period
+        ) t_0
+    ) t_1
+  ) t_2
+GROUP BY month
+ORDER BY month;"
+OP11 Distribution of observation period end dates,"WITH op AS
+  (SELECT
+      DATEDIFF(day,DATEFROMPARTS(1900,1,1),observation_period_end_date) diffs,
+      CAST(CONVERT(VARCHAR, observation_period_end_date, 112) AS INTEGER) AS end_date,
+      COUNT(*)OVER() AS population_size
+   FROM cdm.observation_period
+  )
+SELECT
+  CONVERT(DATE, CAST( min(end_date) AS VARCHAR ))                                                                    AS min_end_date,
+  CONVERT(DATE, CAST( max(end_date) AS VARCHAR ))                                                                    AS max_end_date,
+  DATEADD(day, ROUND(AVG(CAST(diffs AS BIGINT)),1), DATEFROMPARTS(1900,1,1)) AS avg_end_date,
+  round( STDEV( end_date ), 1 )                                                                                      AS STDEV_days ,
+  CONVERT(DATE, CAST(MIN(CASE WHEN order_nr < .25 * population_size THEN 9999999999 ELSE end_date END) AS VARCHAR))  AS percentile_25,
+  CONVERT(DATE, CAST(MIN(CASE WHEN order_nr < .50 * population_size THEN 9999999999 ELSE end_date END) AS VARCHAR))  AS median,
+  CONVERT(DATE, CAST(MIN(CASE WHEN order_nr < .75 * population_size THEN 9999999999 ELSE end_date END) AS VARCHAR))  AS percentile_75
+
+FROM
+ ( SELECT
+     diffs,
+     end_date                                                     AS end_date,
+     ROW_NUMBER() OVER (ORDER BY end_date)                        AS order_nr,
+     population_size
+   FROM op
+ ) ordered_data;"
+OP12 Distribution of observation period length,"WITH w AS 
+  (SELECT
+    DATEDIFF(day, DATEADD(DAY,1,observation_period_start_date), observation_period_end_date)    AS period_length
+  FROM cdm.observation_period
+  ) 
+SELECT 
+  MIN( period_length )                                                              AS min_periods,
+  MAX( period_length )                                                              AS max_periods,
+  round( avg( period_length ) , 2 )                                                 AS avg_period,
+  round( STDEV( period_length ) , 1 )                                               AS STDEV_period,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE period_length END)  AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END)  AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE period_length END)  AS percentile_75
+FROM 
+ ( SELECT 
+     period_length                                                     AS period_length,
+     ROW_NUMBER() OVER (ORDER BY period_length)                        AS order_nr,
+     (SELECT COUNT(*) FROM w )                                    AS population_size
+   FROM w
+ ) ordered_data;"
+OP13 Distribution of observation period start dates,"WITH op AS
+  (SELECT
+      DATEDIFF(day,DATEFROMPARTS(1900,1,1),observation_period_start_date) diffs,
+      ROW_NUMBER() over (order by observation_period_start_date) AS order_nr,
+      CAST(CONVERT(VARCHAR, observation_period_start_date, 112) AS INTEGER) AS start_date,
+      observation_period_start_date AS org_start_date,
+      COUNT(*)OVER() AS population_size
+   FROM cdm.observation_period
+  )
+
+SELECT
+  MIN(org_start_date) AS min_start_date,
+  MAX(org_start_date) AS max_start_date,
+  DATEADD(day, ROUND(AVG(CAST(diffs AS BIGINT)),1), DATEFROMPARTS(1900,1,1)) AS avg_start_date,
+  ROUND(STDEV(start_date), 1)                                             AS STDEV_days,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN DATEFROMPARTS(9999,12,31) ELSE org_start_date END) AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN DATEFROMPARTS(9999,12,31) ELSE org_start_date END) AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN DATEFROMPARTS(9999,12,31) ELSE org_start_date END) AS percentile_75
+FROM op
+;"
+"OP14 Distribution of age, stratified by gender","WITH t AS 
+  ( SELECT 
+      p.person_id, 
+      ISNULL( concept_name, 'MISSING' ) AS gender,
+      YEAR(first_observation_date ) - year_of_birth AS age
+    FROM -- person, first observation period date
+      ( SELECT 
+          person_id,
+          MIN( observation_period_start_date ) AS first_observation_date
+        FROM cdm.observation_period
+        GROUP BY person_id
+      ) AS p
+    INNER JOIN cdm.person 
+    ON p.person_id = person.person_id
+    LEFT OUTER JOIN cdm.concept 
+    ON person.gender_concept_id = concept.concept_id
+    WHERE year_of_birth IS NOT NULL
+  )
+
+SELECT
+  ordered_data.gender,
+  COUNT(*)                                                               AS num_people,
+  MIN( age )                                                             AS min_age,
+  MAX( age )                                                             AS max_age,
+  ROUND( avg( age ), 2 )                                                 AS avg_age,
+  ROUND( STDEV( age ), 1 )                                               AS STDEV_age,
+  MIN(CASE WHEN order_nr < .25 * population_size THEN 9999 ELSE age END) AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE age END) AS median,
+  MIN(CASE WHEN order_nr < .75 * population_size THEN 9999 ELSE age END) AS percentile_75
+FROM 
+ ( SELECT 
+    gender                                                               AS gender,
+    age                                                                  AS age,
+    ROW_NUMBER() OVER (PARTITION BY gender ORDER BY age)                 AS  order_nr
+  FROM t
+) AS ordered_data
+INNER JOIN 
+ ( SELECT gender,
+    COUNT(*) AS population_size
+   FROM t
+   GROUP BY gender
+) AS population_sizes
+ ON ordered_data.gender = population_sizes.gender
+GROUP BY ordered_data.gender;"
+"OP15 Counts of age, stratified by gender","SELECT
+  age,
+  gender,
+  COUNT(*) AS num_people
+FROM
+  ( SELECT
+      w.person_id,
+      ISNULL( concept_name, 'MISSING' )                     AS gender,
+      YEAR(first_observation_date ) - year_of_birth         AS age
+    FROM
+      ( SELECT
+          person_id,
+          MIN( observation_period_start_date ) AS first_observation_date
+        FROM cdm.observation_period
+        GROUP BY person_id
+      ) AS w
+     INNER JOIN cdm.person
+     ON w.person_id = person.person_id
+     LEFT OUTER JOIN cdm.concept
+     ON person.gender_concept_id = concept.concept_id
+     WHERE YEAR(first_observation_date) - year_of_birth >= 0
+  ) AS z
+GROUP BY age, gender
+ORDER BY age, gender;"
+"OP16 Count of genders, stratified by year and age group","SELECT
+  observation_year,
+  age_group,
+  gender,
+  COUNT(*) AS num_people
+FROM
+  (SELECT
+    DISTINCT person_id ,
+    YEAR(observation_period_start_date ) AS observation_year
+   FROM cdm.observation_period
+  ) AS z
+INNER JOIN
+  (SELECT
+    person_id,
+    gender ,
+    CONCAT(CAST(FLOOR( age / 10 ) * 10 AS VARCHAR),' to ',CAST(( FLOOR( age / 10 ) * 10 ) + 9 AS VARCHAR)) AS age_group
+   FROM
+    (SELECT
+      person_id                                        AS person_id,
+      ISNULL( concept_name, 'MISSING' )                AS gender,
+      year_of_birth                                    AS year_of_birth,
+      YEAR(first_observation_date ) - year_of_birth    AS age
+    FROM
+      ( SELECT
+          person.person_id,
+          gender_concept_id,
+          year_of_birth,
+          MIN( observation_period_start_date ) AS first_observation_date
+        FROM cdm.observation_period
+        INNER JOIN cdm.person
+        ON observation_period.person_id = person.person_id
+        GROUP BY person.person_id, gender_concept_id, year_of_birth
+      ) AS y
+    LEFT OUTER JOIN cdm.concept
+    ON concept_id = gender_concept_id
+    WHERE year_of_birth IS NOT NULL
+    ) AS w
+  WHERE age >= 0
+  ) AS m
+  ON z.person_id = m.person_id
+GROUP BY
+  observation_year,
+  age_group,
+  gender
+ORDER BY
+  observation_year,
+  age_group,
+  gender;"
+OP17 Counts of observation period records stratified by observation end date month.,"WITH observation_period_month AS
+  ( SELECT
+      MONTH(observation_period_end_date) AS observation_month
+      FROM cdm.observation_period
+  )
+SELECT
+  observation_month,
+  count(*) AS num_observations
+FROM observation_period_month
+GROUP BY observation_month
+ORDER BY 1;"
+OP18 Counts of observation period records stratified by start of observation month,"WITH observation_period_month AS
+  ( SELECT
+      MONTH(observation_period_start_date) AS observation_month
+      FROM cdm.observation_period
+  )
+SELECT
+  observation_month,
+  COUNT(*)                             AS num_observations
+FROM observation_period_month
+GROUP BY observation_month
+ORDER BY 1;"
+"OP19 Distribution of observation period length, stratified by age.","WITH w AS
+  ( SELECT
+      w_0.person_id,
+      age,
+      period_length
+    FROM
+       /* person, age */
+      (SELECT
+        person.person_id,
+        YEAR(first_observation_date ) - year_of_birth AS age
+       FROM
+        ( SELECT
+            person_id ,
+            MIN( observation_period_start_date ) AS first_observation_date
+          FROM cdm.observation_period
+          GROUP BY person_id
+        ) AS person_first_od
+        INNER JOIN cdm.person person
+        ON person_first_od.person_id = person.person_id
+        WHERE year_of_birth IS NOT NULL
+      ) AS w_0
+    INNER JOIN  
+     /* person, period_length */
+      (SELECT
+        person_id,
+        DATEDIFF(day,DATEADD(DAY,1,observation_period_start_date), observation_period_end_date) AS period_length
+       FROM cdm.observation_period
+      ) AS person_date_diff  
+    ON w_0.person_id = person_date_diff.person_id  
+  )
+SELECT
+  ordered_data.age,
+  COUNT(*)                                                                         AS observation_periods_cnt,
+  MIN(period_length)                                                               AS min_period,
+  MAX(period_length)                                                               AS max_period,
+  ROUND(AVG( period_length ), 2)                                                   AS avg_period,
+  ROUND(STDEV( period_length ), 1)                                                 AS STDEV_period,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS median,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS percentile_75
+FROM
+ ( SELECT age,
+    period_length,
+    ROW_NUMBER() OVER (PARTITION BY age ORDER BY period_length) AS  order_nr
+  FROM w
+) AS ordered_data
+INNER JOIN
+ ( SELECT age,
+    COUNT(*) AS population_size
+   FROM w
+   GROUP BY age
+) AS population_sizes
+ ON ordered_data.age = population_sizes.age
+GROUP BY ordered_data.age;"
+"OP20 Distribution of observation period length, stratified by gender.","WITH w AS
+ ( SELECT
+      person_gender.person_id,
+      gender,
+      period_length
+    FROM /* person, gender */
+      ( SELECT
+          person.person_id ,
+          concept_name                           AS gender
+        FROM
+          ( SELECT
+              person_id,
+              MIN(observation_period_start_date) AS first_observation_date
+            FROM cdm.observation_period
+            GROUP BY person_id
+          ) AS person_first_observation
+    INNER JOIN cdm.person
+    ON person_first_observation.person_id = person.person_id
+    INNER JOIN cdm.concept
+    ON concept.concept_id = person.gender_concept_id
+    WHERE year_of_birth IS NOT NULL
+      ) AS person_gender
+    INNER JOIN
+      ( SELECT
+          person_id,
+          DATEDIFF(day,observation_period_start_date,observation_period_end_date) + 1 AS period_length
+        FROM cdm.observation_period
+      ) AS person_period_length
+    ON person_period_length.person_id = person_gender.person_id
+  )
+
+SELECT
+  ordered_data.gender,
+  COUNT(*)                                                                         AS observation_periods_cnt,
+  MIN(period_length)                                                               AS min_period,
+  MAX(period_length)                                                               AS max_period,
+  ROUND(AVG( period_length ), 2)                                                   AS avg_period,
+  ROUND(STDEV( period_length ), 1)                                                 AS STDEV_period,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS percentile_25,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS median,
+  MIN(CASE WHEN order_nr < .50 * population_size THEN 9999 ELSE period_length END) AS percentile_75
+FROM
+ ( SELECT gender,
+    period_length                                                                  AS period_length,
+    ROW_NUMBER() OVER (PARTITION BY gender ORDER BY period_length)                 AS  order_nr
+  FROM w
+) AS ordered_data
+INNER JOIN
+ ( SELECT gender,
+    COUNT(*) AS population_size
+   FROM w
+   GROUP BY gender
+) AS population_sizes
+ ON ordered_data.gender = population_sizes.gender
+GROUP BY ordered_data.gender;"
+O01 Find a Observation from a keyword,"SELECT DISTINCT     
+  C.concept_id             AS Entity_Concept_Id,
+  C.concept_name           AS Entity_Name,
+  C.concept_code           AS Entity_Code,
+  'Concept'                AS Entity_Type,
+  C.concept_class_id       AS Entity_concept_class_id,
+  C.vocabulary_id          AS Entity_vocabulary_id
+FROM cdm.concept C
+LEFT JOIN cdm.concept_synonym S
+ON C.concept_id = S.concept_id
+WHERE  C.vocabulary_id IN ('LOINC', 'UCUM')
+       AND C.concept_class_id IS NOT NULL
+       AND C.standard_concept = 'S'
+       -- regular expression containing the input pattern
+       AND LOWER(C.concept_name) LIKE LOWER('%Ability to%')
+       -- Retrieve only valid concepts
+       AND getdate() >= C.valid_start_date AND my_date <= C.valid_end_date;"
+PP01 Continuous years with patient counts,"SELECT
+  FLOOR(DATEDIFF(day,payer_plan_period_start_date,payer_plan_period_end_date)/365) AS year_int,
+  COUNT(1)                                                                         AS num_patients
+FROM cdm.payer_plan_period
+GROUP BY floor( DATEDIFF(day,payer_plan_period_start_date, payer_plan_period_end_date) /365)
+ORDER BY 1;"
+PP02 Patient distribution by plan type,"SELECT
+  t.plan_source_value,
+  t.pat_cnt AS num_patients,
+  100.00*t.pat_cnt/ (sum(t.pat_cnt) over()) perc_of_total_count
+FROM 
+  (SELECT 
+    p.plan_source_value, 
+    count(1) AS pat_cnt
+   FROM cdm.payer_plan_period p
+   GROUP BY p.plan_source_value
+  ) AS t
+ORDER BY t.plan_source_value;"
+PE02 Number of patients of specific gender in the dataset,"SELECT COUNT(person_id) AS num_persons
+FROM cdm.person
+WHERE gender_concept_id = 8532"
+PE03 Number of patients grouped by gender,"SELECT
+  person.gender_concept_id,
+  concept.concept_name    AS gender_name,
+  COUNT(person.person_id) AS num_persons
+FROM cdm.person
+  JOIN cdm.concept ON person.gender_concept_id = concept.concept_id
+GROUP BY person.gender_concept_id, concept.concept_name
+;"
+PE06 Number of patients grouped by year of birth,"SELECT
+  year_of_birth,
+  COUNT(person_id) AS num_persons
+FROM cdm.person
+GROUP BY year_of_birth
+ORDER BY year_of_birth
+;"
+PE07 Number of patients grouped by residence state location,"SELECT
+  state    AS state_abbr,
+  COUNT(*) AS num_persons
+FROM cdm.person
+  LEFT JOIN cdm.location ON person.location_id = location.location_id
+GROUP BY state
+ORDER BY state
+;"
+PE08 Number of patients grouped by zip code of residence,"SELECT
+  state,
+  zip,
+  COUNT(*) AS num_persons
+FROM cdm.person
+  LEFT JOIN cdm.location ON person.location_id = location.location_id
+GROUP BY state, zip
+ORDER BY state, zip
+;"
+PE09 Number of patients by gender stratified by year of birth,"SELECT
+  gender_concept_id,
+  concept_name     AS gender_name,
+  year_of_birth    AS year_of_birth,
+  COUNT(*)         AS num_persons
+FROM cdm.person
+  JOIN cdm.concept
+  ON person.gender_concept_id = concept.concept_id
+GROUP BY person.gender_concept_id, concept.concept_name, person.year_of_birth
+ORDER BY concept.concept_name, person.year_of_birth;"
+PE10 Number of patients by day of the year,"SELECT
+  month_of_birth,
+  day_of_birth,
+  count(*) AS num_persons
+FROM cdm.person
+GROUP BY month_of_birth, day_of_birth
+ORDER BY month_of_birth, day_of_birth
+;"
+PE11 Number of patients by month of birth,"SELECT
+  month_of_birth AS month_of_year,
+  count(*)       AS num_persons
+FROM cdm.person
+GROUP BY month_of_birth
+ORDER BY month_of_birth
+;"
+PE12 Distribution of year of birth,"SELECT
+  percentile_25,
+  median,
+  percentile_75,
+  MIN(year_of_birth)                  AS minimum,
+  MAX(year_of_birth)                  AS maximum,
+  CAST(AVG(year_of_birth) AS INTEGER) AS mean,
+  STDEV(year_of_birth)                AS stddev
+FROM
+  (SELECT
+     MAX(CASE WHEN (percentile = 1) THEN year_of_birth END) AS percentile_25,
+     MAX(CASE WHEN (percentile = 2) THEN year_of_birth END) AS median,
+     MAX(CASE WHEN (percentile = 3) THEN year_of_birth END) AS percentile_75
+   FROM
+     (SELECT
+        year_of_birth,
+        births,
+        /* The first sum is the sum of all the values from the first year of birth
+        to the current year.  The second sum is the total of all the years of birth.
+        The result is a cumulative percent of the total for each year.  You want to
+        capture when the percentage goes from 24 to 25 as percentile_25, from 49 to 50
+        as the median and from 74 to 75 as the percentile_75.  Multiplying by 4 then SA
+        adding 1 just makes so that instead of looking at percentage, you get the whole
+        number 1 if the percentage is less than 25, 2 when the percentage is between 25
+        and 50, and so on.
+        */
+        FLOOR(CAST(SUM(births)
+                   OVER (
+                     ORDER BY year_of_birth
+                     ROWS UNBOUNDED PRECEDING ) AS DECIMAL)
+              / CAST(SUM(births)
+                     OVER (
+                       ORDER BY year_of_birth
+                       ROWS BETWEEN UNBOUNDED PRECEDING
+                       AND UNBOUNDED FOLLOWING ) AS DECIMAL)
+              * 4
+        ) + 1 AS percentile
+      FROM -- Year with number of birthsQ
+        (SELECT
+           year_of_birth,
+           COUNT(*) AS births
+         FROM cdm.person
+         GROUP BY year_of_birth
+        ) t
+     ) tt
+   WHERE percentile <= 3
+  ) percentile_table
+CROSS JOIN cdm.person
+GROUP BY percentile_25, median, percentile_75
+;"
+P02 Find a procedure from a keyword.,"SELECT DISTINCT
+  C.concept_id            AS Entity_Concept_Id,
+  C.concept_name          AS Entity_Name,
+  C.concept_code          AS Entity_Code,
+  'Concept'               AS Entity_Type,
+  C.concept_class_id      AS Entity_concept_class_id,
+  C.vocabulary_id         AS Entity_vocabulary_id
+FROM cdm.concept C
+LEFT JOIN cdm.concept_synonym S
+ON C.concept_id = S.concept_id
+WHERE C.vocabulary_id IN ('SNOMED','ICD9Proc','ICD10PCS','CPT4','CDT','HCPCS','SNOMED Veterinary','OPCS4')
+      AND C.domain_id = 'Procedure'
+      AND C.standard_concept = 'S'
+      -- regular expression containing the input pattern
+      AND LOWER(C.concept_name) LIKE LOWER('%Fixation of fracture%')
+            OR LOWER(S.concept_synonym_name) LIKE LOWER('%Fixation of fracture%')
+      -- Retrieve only valid concepts
+      AND WHERE getdate() >= C.valid_start_date AND getdate() <= C.valid_end_date;"
