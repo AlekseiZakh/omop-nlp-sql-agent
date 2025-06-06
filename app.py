@@ -789,7 +789,7 @@ def get_llm_provider_ui():
     
     # Provider selection
     provider_options = {
-        "🔥 Anthropic Claude (Recommended)": LLMProvider.ANTHROPIC,
+        "🔥 Anthropic Claude": LLMProvider.ANTHROPIC,
         "🚀 OpenAI GPT-4": LLMProvider.OPENAI,
         "🌟 Google Gemini": LLMProvider.GOOGLE
     }
